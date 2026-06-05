@@ -7,21 +7,17 @@ __pycache__/
 
 # Local data
 data/raw/**
-data/interim/**
 data/processed/**
-data/external/**
-!data/raw/**/
-!data/interim/**/
-!data/processed/**/
-!data/external/**/
-!data/raw/**/.gitkeep
-!data/interim/**/.gitkeep
-!data/processed/**/.gitkeep
-!data/external/**/.gitkeep
 
-# Generated reports
+!data/raw/**/
+!data/processed/**/
+!data/raw/**/.gitkeep
+!data/processed/**/.gitkeep
+
+# Generated outputs
 reports/figures/**
 reports/tables/**
+
 !reports/figures/**/
 !reports/tables/**/
 !reports/figures/**/.gitkeep
