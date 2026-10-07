@@ -135,7 +135,12 @@ def cmd_ohlcv(args) -> None:
 
 
 def cmd_funding(args) -> None:
-    """Backfill funding events, incrementally from the last stored timestamp."""
+    """Backfill funding events, extending forward and filling backward gaps.
+
+    Normally fetches only from the last stored timestamp forward. If `--start`
+    predates the earliest stored bar (a backward gap), re-fetches from `start`
+    instead and lets the idempotent write dedup the overlap.
+    """
     inst = _resolve_assets(args, args.exchange)
     start = date.fromisoformat(args.start) if args.start else DEFAULT_START[args.exchange]
     end = date.fromisoformat(args.end) if args.end else bnc.utc_today()
@@ -143,9 +148,10 @@ def cmd_funding(args) -> None:
     for _, row in inst.iterrows():
         asset, symbol = row["canonical_id"], row["symbol"]
         have = _existing_ts("funding", args.exchange, asset)
-        fetch_from = (
-            max(_utc(start), have.max() + pd.Timedelta("1ms")) if have.size else _utc(start)
-        )
+        if have.size and _utc(start) >= have.min():
+            fetch_from = have.max() + pd.Timedelta("1ms")  # forward increment
+        else:
+            fetch_from = _utc(start)  # empty, or a backward gap to fill
         df = fetch(symbol, fetch_from, _utc(end + timedelta(days=1)))
         if not df.empty:
             storage.write_partition(df, "funding", args.exchange, asset)

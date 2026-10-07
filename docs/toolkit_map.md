@@ -6,6 +6,10 @@ Management* notes. The math is asset-class-agnostic (factor models, vol, Kelly,
 MVO all apply to crypto perps); equity-only descriptors (country/industry/13f)
 are noted as such and kept thin.
 
+For the practical workflow from a single-factor hypothesis through forecast
+explanation, realised-PnL attribution, and dynamic exposure, see
+[Single-Factor Research: Testing, Attribution, and Dynamic Trading](single_factor_testing_pipeline.md).
+
 ## Foundation (Tier 1) — everything builds on these
 
 | Module | Contents | Source |

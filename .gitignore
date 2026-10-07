@@ -12,20 +12,10 @@ docs/references/
 docs/elements_of_quant_investing_math_summary.md
 docs/advanced_portfolio_management_summary.md
 
-# Local data
-data/raw/**
-data/interim/**
-data/external/**
-data/processed/**
-
-!data/raw/**/
-!data/interim/**/
-!data/external/**/
-!data/processed/**/
-!data/raw/**/.gitkeep
-!data/interim/**/.gitkeep
-!data/external/**/.gitkeep
-!data/processed/**/.gitkeep
+# Local data (all datasets and caches; only directory placeholders are tracked)
+data/**
+!data/**/
+!data/**/.gitkeep
 
 # Generated outputs
 reports/figures/**

@@ -21,24 +21,30 @@ src/quant_hub/
     assets/      prices, funding, open interest
   alpha/         signals, features, momentum, funding signals
   indicators/    technical, volatility, market structure
-  backtest/      metrics, blotter
+  backtest/      metrics, multiple_testing, blotter
     engines/     vectorized, event-driven
     strategies/  base, momentum, funding carry, hyperliquid btc
   portfolio/     construction, sizing, positions, constraints
-  risk/          volatility, drawdown, leverage, exposures, liquidation
+  risk/          volatility, covariance, factor_model, hedging,
+                 exposures, leverage, drawdown, liquidation
   costs/         fees, slippage, funding
   execution/     orders, paper broker
-  attribution/   pnl decomposition, factor/funding attribution
+  attribution/   factor attribution, performance, pnl decomposition
   reporting/     charts, tables, reports
-  utils/         config, dates, logging
+  utils/         config, dates, logging, state_space
 
 data/            raw -> interim -> processed (contents gitignored)
+docs/            book summaries, toolkit_map.md, design notes
 notebooks/       exploratory work
 research_memos/  written-up findings
 reports/         generated figures and tables (gitignored)
 config/          strategy/run configuration
 tests/           pytest suite
 ```
+
+The research toolkit (`risk`, `portfolio`, `alpha`, `attribution`, `costs`,
+`backtest`) implements the math from two Paleologo texts, mapped module-by-module
+in [docs/toolkit_map.md](docs/toolkit_map.md). Worked examples are below.
 
 ## Data layer
 
@@ -121,8 +127,130 @@ Notes: all timestamps UTC with bar OPEN time convention; the `funding` dataset's
 columns differ per venue (Binance has `mark_price`, HL has `premium`); Binance OI
 dumps exist since ~2021-12; HL deep candle history (S3 archive) not wired up yet.
 
+## Research toolkit
+
+The `risk`, `portfolio`, `alpha`, `attribution`, `costs`, and `backtest` packages
+are a factor-model-centred quant toolkit (full module map:
+[docs/toolkit_map.md](docs/toolkit_map.md)). Everything takes numpy/pandas and
+returns the same; the risk machinery keys on a `FactorModel` object. Shape
+conventions: `n` assets, `m` factors, `T` periods; wide return matrices are
+`(T, n)`.
+
+### End-to-end: a cross-sectional momentum book
+
+Load data → build a signal → fit a risk model → construct and size the portfolio.
+This runs as-is against the backfilled data:
+
+```python
+import numpy as np
+from quant_hub.data.loaders import load_ohlcv
+from quant_hub.alpha import momentum, signals
+from quant_hub.risk import covariance
+from quant_hub.risk.factor_model import FactorModel
+from quant_hub.portfolio import construction
+
+# 1. Wide close-price matrix -> daily log returns
+universe = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "LINK", "LTC"]
+closes = load_ohlcv(universe, start="2023-06-01", end="2024-12-31", field="close")
+daily  = closes.resample("1D").last().dropna(how="any")
+rets   = np.log(daily).diff().dropna()
+
+# 2. Cross-sectional momentum at the last date, z-scored into an alpha
+mom   = momentum.cross_sectional_momentum(daily, lookback=60, skip=5).iloc[-1]
+alpha = signals.zscore(mom)
+
+# 3. A 2-factor statistical risk model (PPCA) from the return history
+loadings, factor_cov, idio = covariance.ppca(rets.to_numpy(), n_factors=2)
+fm = FactorModel(loadings, factor_cov, np.full(rets.shape[1], idio))
+
+# 4. Mean-variance weights at a 10%-vol budget, then inspect the risk
+cov_r = fm.asset_covariance()
+w = construction.mean_variance_weights(alpha.to_numpy(), cov_r, vol_target=0.10)
+print({a: round(float(x), 3) for a, x in zip(daily.columns, w)})
+print("pct idio variance: %.2f" % fm.pct_idio_variance(w))   # ~0.68
+```
+
+### Building blocks
+
+Short, self-contained fragments for each area (the objects `daily`, `rets`,
+`alpha`, `cov_r`, `loadings` come from the example above).
+
+**Volatility & risk models** (`quant_hub.risk`)
+
+```python
+from quant_hub.risk import volatility, covariance
+
+btc_ret = rets["BTC"]
+vol = volatility.ewma_volatility(btc_ret, halflife=20)          # filtered EWMA vol
+volatility.annualize_volatility(vol.iloc[-1], 252)             # daily -> annual
+garch = volatility.GARCH11().fit(btc_ret); garch.forecast(10)  # conditional-var forecast
+
+shrunk, intensity = covariance.ledoit_wolf_shrinkage(rets.to_numpy())  # well-conditioned cov
+fm.factor_mimicking_portfolios()          # min-idio-risk unit-exposure portfolios (n x m)
+```
+
+**Signals & alpha** (`quant_hub.alpha`)
+
+```python
+from quant_hub.alpha import signals
+
+fwd = rets.shift(-1).iloc[-2]                                   # next-period returns
+ic  = signals.information_coefficient(alpha, fwd)              # cross-sectional IC
+signals.ic_to_sharpe(ic, breadth=len(alpha))                  # fundamental law: IC * sqrt(n)
+signals.orthogonalize(alpha.to_numpy(), loadings)             # strip factor exposure from a signal
+```
+
+**Portfolio construction & sizing** (`quant_hub.portfolio`)
+
+```python
+from quant_hub.portfolio import construction, sizing
+
+construction.factor_neutral_weights(alpha.to_numpy(), loadings)   # proportional, B'w = 0
+construction.robust_mvo_weights(alpha.to_numpy(), cov_r, 1e-4, vol_target=0.10)  # alpha-uncertainty
+sizing.proportional_size(alpha.to_numpy(), gross=1.0)            # APM's robust default
+sizing.kelly_fraction(mu=0.001, sigma=0.02)                     # growth-optimal capital fraction
+```
+
+**Evaluation & backtest hygiene** (`quant_hub.backtest`)
+
+```python
+from quant_hub.backtest import metrics, multiple_testing
+
+strat_ret = (rets * (w / np.abs(w).sum())).sum(axis=1).to_numpy()
+eq = metrics.equity_from_returns(strat_ret)
+sr = metrics.sharpe_ratio(strat_ret, periods_per_year=252)
+metrics.sharpe_confidence_interval(sr, n_obs=len(strat_ret))    # Lo (2002) — SR error bars
+metrics.max_drawdown(eq)
+# haircut an in-sample Sharpe for how many strategies you searched
+multiple_testing.rademacher_haircut_sharpe(sr, np.column_stack([strat_ret] * 20))
+# probabilistic-forecast scoring (also used by the Polymarket work)
+metrics.brier_score(prob=[0.6, 0.3], outcome=[1, 0])
+```
+
+**Funding — the perp-native carry** (`quant_hub.alpha.funding_signals`)
+
+```python
+from quant_hub.data.loaders import load_funding
+from quant_hub.alpha import funding_signals as fs
+
+f = load_funding(["BTC"], exchange="hyperliquid", start="2024-01-01")
+fs.funding_carry(f["rate"], interval_hours=1)          # annualized carry a short position earns
+fs.cross_venue_funding_spread(f["rate"], 1, f["rate"], 8)   # HL(1h) vs Binance(8h) spread
+```
+
+**Attribution & risk reporting** (`quant_hub.attribution`, `quant_hub.risk`)
+
+```python
+from quant_hub.risk import exposures
+from quant_hub.attribution import performance
+
+exposures.risk_decomposition(fm, w)                    # per-factor %Var / $Vol / MCFR table
+performance.effective_breadth(w)                       # 1 / Herfindahl of the book
+performance.selection_sizing_timing(weights_ts, idio_returns_ts)   # skill decomposition (T x n)
+```
+
 ## Tooling
 
-- `uv run pytest` — tests
-- `uv run ruff check .` — lint
+- `uv run pytest` — tests (`test_data_layer.py`, `test_toolkit.py`)
+- `uv run ruff check .` — lint (PEP 8 + numpy-style docstrings)
 - `uv run black .` — format (line length 100)
