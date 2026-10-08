@@ -1,7 +1,9 @@
 """Binance USDT-M perps: bulk dumps (data.binance.vision) + light REST.
 
-Bulk dumps are the primary backfill path (klines, metrics/open-interest);
-REST is used where dumps don't exist (funding history, exchangeInfo).
+Bulk dumps are the primary backfill path (klines, metrics/open-interest,
+monthly funding); REST is used where dumps don't exist (current-month funding,
+exchangeInfo). Note that fapi.binance.com is geo-blocked (HTTP 451) from some
+locations, while data.binance.vision is not — prefer dumps wherever they exist.
 All returned frames use a UTC `ts` column = bar OPEN time / event time,
 and keep venue-native column values otherwise.
 """
@@ -126,8 +128,47 @@ def fetch_metrics_day(symbol: str, day: date) -> pd.DataFrame | None:
     return out
 
 
+def fetch_funding_month(symbol: str, year: int, month: int) -> pd.DataFrame | None:
+    """One month of funding events from the monthly dump; None if absent.
+
+    Dump columns: calc_time (epoch ms), funding_interval_hours, last_funding_rate.
+    Monthly files appear a few days after month end; there are no daily dumps,
+    so the current month is never available from this path.
+    """
+    base = f"{VISION}/futures/um/monthly/fundingRate/{symbol}"
+    resp = _get(f"{base}/{symbol}-fundingRate-{year}-{month:02d}.zip")
+    if resp is None:
+        return None
+    df = _read_zipped_csv(resp.content)
+    df.columns = [c.strip() for c in df.columns]
+    out = pd.DataFrame(
+        {
+            "ts": pd.to_datetime(df["calc_time"].astype("int64"), unit="ms", utc=True),
+            "rate": pd.to_numeric(df["last_funding_rate"]),
+            "interval_hours": pd.to_numeric(df["funding_interval_hours"]).astype("int64"),
+            "symbol": symbol,
+        }
+    )
+    # calc_time carries a few ms of jitter (…00001, …00002); settlement is on the hour
+    out["ts"] = out["ts"].dt.round("1min")
+    return out.drop_duplicates(subset="ts").sort_values("ts")
+
+
+def fetch_funding_dumps(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
+    """Funding events from monthly dumps covering [start, end); missing months skipped."""
+    frames = []
+    for year, month in month_range(start.date(), end.date()):
+        df = fetch_funding_month(symbol, year, month)
+        if df is not None:
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame(columns=["ts", "rate", "interval_hours", "symbol"])
+    out = pd.concat(frames, ignore_index=True)
+    return out[(out["ts"] >= start) & (out["ts"] < end)].reset_index(drop=True)
+
+
 def fetch_funding(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
-    """Funding history via REST (no bulk dump exists). Paginates in 1000s."""
+    """Funding history via REST (fapi). Paginates in 1000s. Geo-blocked in some regions."""
     rows: list[dict] = []
     cursor = int(start.timestamp() * 1000)
     end_ms = int(end.timestamp() * 1000)

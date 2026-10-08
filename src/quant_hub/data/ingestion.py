@@ -12,7 +12,7 @@ restarting a backfill is always safe.
 
 Datasets written (all raw, venue-native):
     ohlcv_15m      15m bars        (binance: bulk dumps; hyperliquid: API, recent only)
-    funding        funding events  (binance REST, hyperliquid API)
+    funding        funding events  (binance monthly dumps + optional REST tail, hyperliquid API)
     open_interest  5-min OI snapshots (binance metrics dumps, exist since ~2021-12)
 """
 
@@ -140,11 +140,15 @@ def cmd_funding(args) -> None:
     Normally fetches only from the last stored timestamp forward. If `--start`
     predates the earliest stored bar (a backward gap), re-fetches from `start`
     instead and lets the idempotent write dedup the overlap.
+
+    Binance: monthly bulk dumps are the primary source (no geo-block, no rate
+    limits); the current month has no dump, so its tail is fetched via REST only
+    when `--source rest` or `--source both` is given (fapi may be geo-blocked).
     """
     inst = _resolve_assets(args, args.exchange)
     start = date.fromisoformat(args.start) if args.start else DEFAULT_START[args.exchange]
     end = date.fromisoformat(args.end) if args.end else bnc.utc_today()
-    fetch = bnc.fetch_funding if args.exchange == "binance" else hl.fetch_funding
+    source = getattr(args, "source", "dumps")
     for _, row in inst.iterrows():
         asset, symbol = row["canonical_id"], row["symbol"]
         have = _existing_ts("funding", args.exchange, asset)
@@ -152,7 +156,17 @@ def cmd_funding(args) -> None:
             fetch_from = have.max() + pd.Timedelta("1ms")  # forward increment
         else:
             fetch_from = _utc(start)  # empty, or a backward gap to fill
-        df = fetch(symbol, fetch_from, _utc(end + timedelta(days=1)))
+        fetch_to = _utc(end + timedelta(days=1))
+        if args.exchange == "hyperliquid":
+            df = hl.fetch_funding(symbol, fetch_from, fetch_to)
+        elif source == "rest":
+            df = bnc.fetch_funding(symbol, fetch_from, fetch_to)
+        else:
+            df = bnc.fetch_funding_dumps(symbol, fetch_from, fetch_to)
+            if source == "both":
+                tail_from = df["ts"].max() + pd.Timedelta("1ms") if not df.empty else fetch_from
+                tail = bnc.fetch_funding(symbol, tail_from, fetch_to)
+                df = pd.concat([df, tail], ignore_index=True)
         if not df.empty:
             storage.write_partition(df, "funding", args.exchange, asset)
         print(f"funding {args.exchange} {asset:12s} +{len(df)} rows", flush=True)
@@ -246,7 +260,15 @@ def main() -> None:
         )
 
     _add_common(sub.add_parser("ohlcv", help="backfill 15m bars"), ["binance", "hyperliquid"])
-    _add_common(sub.add_parser("funding", help="backfill funding"), ["binance", "hyperliquid"])
+    funding = sub.add_parser("funding", help="backfill funding")
+    _add_common(funding, ["binance", "hyperliquid"])
+    funding.add_argument(
+        "--source",
+        choices=["dumps", "rest", "both"],
+        default="dumps",
+        help="binance only: monthly dumps (default, lags up to a month), REST (fapi, "
+        "may be geo-blocked), or dumps plus a REST tail for the current month",
+    )
     oi = sub.add_parser("oi", help="backfill open interest (binance)")
     _add_common(oi, ["binance"])
     oi.add_argument(

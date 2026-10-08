@@ -105,3 +105,35 @@ def test_loaders_missing_dataset_message(tmp_path, monkeypatch):
     monkeypatch.setattr(loaders, "RAW_ROOT", tmp_path)
     with pytest.raises(FileNotFoundError, match="ingestion"):
         loaders.load_funding(["BTC"])
+
+
+def test_binance_funding_dump_parsing(monkeypatch):
+    """Monthly funding dump CSV -> (ts, rate, interval_hours, symbol), jitter rounded."""
+    import io
+    import zipfile
+
+    from quant_hub.data.connectors import binance_connector as bnc
+
+    csv = (
+        "calc_time,funding_interval_hours,last_funding_rate\n"
+        "1748736000001,8,-0.00000582\n"
+        "1748764800002,8,0.00010000\n"
+        "1748764800002,8,0.00010000\n"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("BTCUSDT-fundingRate-2025-06.csv", csv)
+
+    class _Resp:
+        content = buf.getvalue()
+
+    monkeypatch.setattr(bnc, "_get", lambda url, params=None, retries=3: _Resp())
+    df = bnc.fetch_funding_month("BTCUSDT", 2025, 6)
+    assert list(df.columns) == ["ts", "rate", "interval_hours", "symbol"]
+    assert len(df) == 2  # duplicate row dropped
+    assert df["ts"].iloc[0] == pd.Timestamp("2025-06-01 00:00:00", tz="UTC")  # 1 ms jitter removed
+    assert df["interval_hours"].iloc[0] == 8
+    assert abs(df["rate"].iloc[0] - (-0.00000582)) < 1e-12
+
+    monkeypatch.setattr(bnc, "_get", lambda url, params=None, retries=3: None)
+    assert bnc.fetch_funding_month("BTCUSDT", 2019, 1) is None
