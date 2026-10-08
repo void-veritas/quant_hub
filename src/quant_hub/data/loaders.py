@@ -70,9 +70,10 @@ def load_ohlcv(
     end: str | None = None,
     exchange: str = "binance",
     field: str | None = None,
+    interval: str = "15m",
 ) -> pd.DataFrame:
-    """15m bars. `field="close"` pivots to a ts x asset wide matrix."""
-    df = _load("ohlcv_15m", assets, start, end, exchange)
+    """Bars (15m, or 1d for hyperliquid). `field="close"` pivots to a ts x asset wide matrix."""
+    df = _load("ohlcv_1d" if interval == "1d" else "ohlcv_15m", assets, start, end, exchange)
     if field is None:
         return df
     return df.pivot_table(index="ts", columns="asset", values=field)

@@ -12,6 +12,7 @@ restarting a backfill is always safe.
 
 Datasets written (all raw, venue-native):
     ohlcv_15m      15m bars        (binance: bulk dumps; hyperliquid: API, recent only)
+    ohlcv_1d       daily bars      (hyperliquid API, full history; `--interval 1d`)
     funding        funding events  (binance monthly dumps + optional REST tail, hyperliquid API)
     open_interest  5-min OI snapshots (binance metrics dumps, exist since ~2021-12)
     hl_l2_hour     per-hour L2 summaries from the HL S3 archive (requester pays):
@@ -22,6 +23,7 @@ Datasets written (all raw, venue-native):
 from __future__ import annotations
 
 import argparse
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dtime
@@ -133,18 +135,24 @@ def _fill_binance_day_gaps(asset: str, symbol: str, start: date, end: date) -> i
     return n
 
 
-def _ohlcv_hyperliquid(inst: pd.DataFrame, start: date, end: date) -> None:
-    """Backfill 15m bars from the HL API (serves recent history only)."""
+def _ohlcv_hyperliquid(inst: pd.DataFrame, start: date, end: date, interval: str = "15m") -> None:
+    """Backfill bars from the HL API.
+
+    Intraday intervals serve only the most recent ~5000 bars; "1d" serves the full
+    history (with synthetic zero-volume bars before real trading began), which is
+    what point-in-time universe selection by dollar volume needs.
+    """
+    dataset = "ohlcv_1d" if interval == "1d" else "ohlcv_15m"
+    step = pd.Timedelta(days=1) if interval == "1d" else pd.Timedelta("15min")
     for _, row in inst.iterrows():
         asset, symbol = row["canonical_id"], row["symbol"]
-        have = _existing_ts("ohlcv_15m", "hyperliquid", asset)
-        fetch_from = (
-            max(_utc(start), have.max() + pd.Timedelta("15min")) if have.size else _utc(start)
-        )
-        df = hl.fetch_candles(symbol, "15m", fetch_from, _utc(end + timedelta(days=1)))
+        have = _existing_ts(dataset, "hyperliquid", asset)
+        fetch_from = max(_utc(start), have.max() + step) if have.size else _utc(start)
+        df = hl.fetch_candles(symbol, interval, fetch_from, _utc(end + timedelta(days=1)))
         if not df.empty:
-            storage.write_partition(df, "ohlcv_15m", "hyperliquid", asset)
-        print(f"ohlcv hyperliquid {asset:12s} +{len(df)} rows (recent history only)", flush=True)
+            storage.write_partition(df, dataset, "hyperliquid", asset)
+        print(f"ohlcv({interval}) hyperliquid {asset:12s} +{len(df)} rows", flush=True)
+        time.sleep(1.1)  # candleSnapshot weighs 20 of the 1200/min budget
 
 
 def cmd_ohlcv(args) -> None:
@@ -155,7 +163,9 @@ def cmd_ohlcv(args) -> None:
     if args.exchange == "binance":
         _ohlcv_binance(inst, start, end)
     else:
-        _ohlcv_hyperliquid(inst, start, end)
+        if args.interval == "1d":
+            start = date.fromisoformat(args.start) if args.start else date(2020, 1, 1)
+        _ohlcv_hyperliquid(inst, start, end, interval=args.interval)
 
 
 def cmd_funding(args) -> None:
@@ -328,7 +338,9 @@ def main() -> None:
             "(needs SCRAPING_BEE_KEY; spares the local IP's venue rate limits)",
         )
 
-    _add_common(sub.add_parser("ohlcv", help="backfill 15m bars"), ["binance", "hyperliquid"])
+    ohlcv = sub.add_parser("ohlcv", help="backfill bars (15m; hyperliquid also 1d)")
+    _add_common(ohlcv, ["binance", "hyperliquid"])
+    ohlcv.add_argument("--interval", choices=["15m", "1d"], default="15m")
     funding = sub.add_parser("funding", help="backfill funding")
     _add_common(funding, ["binance", "hyperliquid"])
     funding.add_argument(
