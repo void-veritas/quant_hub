@@ -106,7 +106,28 @@ def _ohlcv_binance(inst: pd.DataFrame, start: date, end: date) -> None:
                 if df is not None:
                     storage.write_partition(df, "ohlcv_15m", "binance", asset)
                     n += len(df)
+        # Monthly dumps are occasionally truncated (e.g. SOL/TRX/XRP/ZEC lack
+        # 2022-02-26..28 and 2022-04-01..02); daily dumps exist for those days.
+        n += _fill_binance_day_gaps(asset, symbol, start, daily_cutoff)
         print(f"ohlcv binance {asset:12s} +{n} rows", flush=True)
+
+
+def _fill_binance_day_gaps(asset: str, symbol: str, start: date, end: date) -> int:
+    """Fetch daily dumps for days inside the stored range that hold fewer than 96 bars."""
+    have = _existing_ts("ohlcv_15m", "binance", asset)
+    if not have.size:
+        return 0
+    first_day = max(start, have.min().date())
+    counts = pd.Series(1, index=have).groupby(have.floor("D")).size()
+    n = 0
+    for day in bnc.day_range(first_day, min(end, have.max().date())):
+        if counts.get(pd.Timestamp(day, tz="UTC"), 0) >= 96:
+            continue
+        df = bnc.fetch_klines_day(symbol, "15m", day)
+        if df is not None:
+            storage.write_partition(df, "ohlcv_15m", "binance", asset)
+            n += len(df)
+    return n
 
 
 def _ohlcv_hyperliquid(inst: pd.DataFrame, start: date, end: date) -> None:
