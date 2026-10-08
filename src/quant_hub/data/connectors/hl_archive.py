@@ -17,13 +17,14 @@ so callers should budget: `estimate_bytes()` before a large pull.
 from __future__ import annotations
 
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 
 import boto3
 import lz4.frame
 import pandas as pd
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 BUCKET = "hyperliquid-archive"
 ARCHIVE_START = date(2023, 4, 15)
@@ -41,15 +42,26 @@ def key_for(day: date, hour: int, coin: str) -> str:
     return f"market_data/{day:%Y%m%d}/{hour}/l2Book/{coin}.lz4"
 
 
-def fetch_hour_raw(day: date, hour: int, coin: str) -> bytes | None:
-    """Download and decompress one hour file; None if the key does not exist."""
-    try:
-        obj = _client().get_object(Bucket=BUCKET, Key=key_for(day, hour, coin), **_RP)
-    except ClientError as err:
-        if err.response["Error"]["Code"] in ("NoSuchKey", "404"):
-            return None
-        raise
-    return lz4.frame.decompress(obj["Body"].read())
+def fetch_hour_raw(day: date, hour: int, coin: str, retries: int = 4) -> bytes | None:
+    """Download and decompress one hour file; None if the key does not exist.
+
+    Transient transport errors (truncated streams, throttling) are retried with
+    exponential backoff; a missing key is not an error.
+    """
+    for attempt in range(retries):
+        try:
+            obj = _client().get_object(Bucket=BUCKET, Key=key_for(day, hour, coin), **_RP)
+            return lz4.frame.decompress(obj["Body"].read())
+        except ClientError as err:
+            if err.response["Error"]["Code"] in ("NoSuchKey", "404"):
+                return None
+            if attempt == retries - 1:
+                raise
+        except (BotoCoreError, OSError):
+            if attempt == retries - 1:
+                raise
+        time.sleep(2**attempt)
+    return None
 
 
 def parse_snapshots(raw: bytes, coin: str, depth_bps=(10, 25, 50)) -> pd.DataFrame:
