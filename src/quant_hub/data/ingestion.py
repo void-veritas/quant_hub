@@ -14,6 +14,9 @@ Datasets written (all raw, venue-native):
     ohlcv_15m      15m bars        (binance: bulk dumps; hyperliquid: API, recent only)
     funding        funding events  (binance monthly dumps + optional REST tail, hyperliquid API)
     open_interest  5-min OI snapshots (binance metrics dumps, exist since ~2021-12)
+    hl_l2_hour     per-hour L2 summaries from the HL S3 archive (requester pays):
+                   first snapshot of the hour (decision-time mid/spread/depth) and
+                   hour medians; `l2hour --hour 9` builds the YOLO 09:00 panel
 """
 
 from __future__ import annotations
@@ -27,8 +30,8 @@ import pandas as pd
 
 from quant_hub.data import storage, validation
 from quant_hub.data.connectors import binance_connector as bnc
+from quant_hub.data.connectors import hl_archive, scrapingbee
 from quant_hub.data.connectors import hyperliquid_connector as hl
-from quant_hub.data.connectors import scrapingbee
 from quant_hub.data.instruments import build_instruments, load_instruments, save_instruments
 
 DEFAULT_START = {"binance": date(2019, 9, 8), "hyperliquid": date(2023, 3, 1)}
@@ -223,6 +226,48 @@ def cmd_oi(args) -> None:
         print(f"oi binance {asset:12s} +{n} rows", flush=True)
 
 
+def cmd_l2hour(args) -> None:
+    """Summarise one archive hour per day per asset from HL L2 snapshots.
+
+    Writes dataset `hl_l2_hour` (exchange=hyperliquid). Only days not yet stored
+    for that hour are fetched, so re-runs are cheap. Egress is billed to the
+    requester; the estimate is printed before any download.
+    """
+    inst = _resolve_assets(args, "hyperliquid")
+    start = date.fromisoformat(args.start) if args.start else hl_archive.ARCHIVE_START
+    end = date.fromisoformat(args.end) if args.end else hl_archive.utc_today()
+    days = hl_archive.list_days(start, end)
+    coins = list(inst["symbol"])
+    est = hl_archive.estimate_bytes(days, coins, args.hour)
+    print(
+        f"l2hour: {len(days)} days x {len(coins)} coins, hour {args.hour}; "
+        f"~{est / 1e9:.1f} GB egress (~${est / 1e9 * 0.09:.2f})",
+        flush=True,
+    )
+    if args.dry_run:
+        return
+    for _, row in inst.iterrows():
+        asset, symbol = row["canonical_id"], row["symbol"]
+        have = _existing_ts("hl_l2_hour", "hyperliquid", asset)
+        have_days = {t.date() for t in have if t.hour == args.hour}
+        todo = [d for d in days if d not in have_days]
+        rows = []
+
+        def _one(day, sym=symbol):
+            snaps = hl_archive.fetch_hour(day, args.hour, sym)
+            return None if snaps is None or snaps.empty else hl_archive.hour_summary(snaps)
+
+        for _day, summary in hl_archive.fetch_many(todo, _one, workers=args.concurrency):
+            if summary is not None:
+                rows.append(summary)
+            if len(rows) >= 200:
+                storage.write_partition(pd.DataFrame(rows), "hl_l2_hour", "hyperliquid", asset)
+                rows = []
+        if rows:
+            storage.write_partition(pd.DataFrame(rows), "hl_l2_hour", "hyperliquid", asset)
+        print(f"l2hour hyperliquid {asset:12s} {len(todo)} days fetched", flush=True)
+
+
 FREQ = {"ohlcv_15m": "15min", "open_interest": "5min"}
 
 
@@ -296,6 +341,12 @@ def main() -> None:
         "--concurrency", type=int, default=1, help="parallel downloads per asset (default 1)"
     )
 
+    l2 = sub.add_parser("l2hour", help="HL archive: summarise one L2 hour per day (requester pays)")
+    _add_common(l2, ["hyperliquid"])
+    l2.add_argument("--hour", type=int, default=9, help="UTC hour of the archive file (default 9)")
+    l2.add_argument("--concurrency", type=int, default=8)
+    l2.add_argument("--dry-run", action="store_true", help="print the egress estimate and exit")
+
     gaps = sub.add_parser("gaps", help="report missing bars per asset")
     gaps.add_argument("--dataset", choices=["ohlcv_15m", "funding", "open_interest"], required=True)
     gaps.add_argument("--exchange")
@@ -309,6 +360,7 @@ def main() -> None:
         "funding": cmd_funding,
         "oi": cmd_oi,
         "gaps": cmd_gaps,
+        "l2hour": cmd_l2hour,
     }[args.command](args)
 
 
