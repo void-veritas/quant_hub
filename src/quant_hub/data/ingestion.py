@@ -255,7 +255,10 @@ def cmd_l2hour(args) -> None:
 
         def _one(day, sym=symbol):
             snaps = hl_archive.fetch_hour(day, args.hour, sym)
-            return None if snaps is None or snaps.empty else hl_archive.hour_summary(snaps)
+            if snaps is None or snaps.empty:
+                return None
+            nominal = pd.Timestamp(day) + pd.Timedelta(hours=args.hour)
+            return hl_archive.hour_summary(snaps, archive_hour=nominal)
 
         for _day, summary in hl_archive.fetch_many(todo, _one, workers=args.concurrency):
             if summary is not None:

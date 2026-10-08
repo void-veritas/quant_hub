@@ -112,11 +112,17 @@ def fetch_hour(day: date, hour: int, coin: str) -> pd.DataFrame | None:
     return None if raw is None else parse_snapshots(raw, coin)
 
 
-def hour_summary(snaps: pd.DataFrame) -> dict:
-    """Per-hour aggregates used by the daily decision-time dataset."""
+def hour_summary(snaps: pd.DataFrame, archive_hour: pd.Timestamp | None = None) -> dict:
+    """Per-hour aggregates used by the daily decision-time dataset.
+
+    `archive_hour` is the file's nominal hour (day + hour, UTC); the first
+    message in an hour file can be stamped a few hundred ms before the hour, so
+    the row's `ts` must come from the file name, not from the message.
+    """
     first = snaps.iloc[0]
+    ts = pd.Timestamp(archive_hour) if archive_hour is not None else snaps["ts"].iloc[-1].floor("h")
     out = {
-        "ts": snaps["ts"].iloc[0].floor("h"),
+        "ts": ts.tz_localize("UTC") if ts.tzinfo is None else ts,
         "n_snapshots": len(snaps),
         "first_ts": first["ts"],
         "open_mid": first["mid"],
