@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 
 from quant_hub.backtest import metrics
-from quant_hub.backtest.multiple_testing import rademacher_haircut_sharpe
+from quant_hub.backtest.multiple_testing import rademacher_complexity, rademacher_haircut_sharpe
 
 
 def _as_index(dates) -> pd.DatetimeIndex:
@@ -130,6 +130,10 @@ def compare_variants(
 
     `returns` is (T, N): one daily return column per variant, same dates. The
     haircut treats the N columns as the set of strategies that was searched.
+    Note: the full EQI bound has an estimation term 3 sqrt(2 ln(2/delta) / T) that
+    is about 0.25 daily (4.9 annualised) at T = 1000, so `sharpe_after_haircut` is
+    uninformative for a few years of daily data; `snooping_2R_ann` isolates the
+    selection inflation, which is the part that grows with the number of variants.
     """
     cv = cpcv(returns.index, n_groups=n_groups, n_test=1)
     rows = {}
@@ -147,6 +151,9 @@ def compare_variants(
     X = returns.fillna(0.0).to_numpy()
     X = (X - X.mean(axis=0)) / X.std(axis=0, ddof=1)
     daily_sr = table["sharpe"] / np.sqrt(periods_per_year)
+    # the selection (data-snooping) part of the bound alone: 2 x Rademacher complexity, annualised
+    two_r = 2 * rademacher_complexity(X, n_draws, seed)
+    table["snooping_2R_ann"] = two_r * np.sqrt(periods_per_year)
     table["sharpe_after_haircut"] = [
         rademacher_haircut_sharpe(float(sr), X, n_draws=n_draws, seed=seed)
         * np.sqrt(periods_per_year)
