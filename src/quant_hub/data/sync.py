@@ -51,6 +51,7 @@ def _remote_index(s3, bucket: str, dataset: str | None) -> dict[str, int]:
 
 
 def push(bucket: str, dataset: str | None = None, workers: int = 8, root: Path = DATA_ROOT) -> int:
+    """Upload local raw/ and external/ files missing or differing in size on the bucket."""
     s3 = boto3.client("s3")
     remote = _remote_index(s3, bucket, dataset)
     todo = [
@@ -69,6 +70,7 @@ def push(bucket: str, dataset: str | None = None, workers: int = 8, root: Path =
 
 
 def pull(bucket: str, dataset: str | None = None, workers: int = 8, root: Path = DATA_ROOT) -> int:
+    """Download bucket files missing or differing in size locally."""
     s3 = boto3.client("s3")
     remote = _remote_index(s3, bucket, dataset)
     local = {rel: p.stat().st_size for rel, p in _local_files(root, None)}

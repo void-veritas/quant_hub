@@ -57,6 +57,7 @@ def yolo_factors() -> pd.DataFrame:
 
 
 def yolo_volatilities() -> pd.DataFrame:
+    """Latest EWMA volatility per ticker (annualised, lambda 0.94)."""
     return pd.DataFrame(_get("/yolo/volatilities")["data"])
 
 
