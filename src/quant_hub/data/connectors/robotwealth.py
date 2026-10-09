@@ -28,7 +28,7 @@ _client = httpx.Client(timeout=120, follow_redirects=True)
 
 
 def _key() -> str:
-    key = os.environ.get("RW_PRO", "").strip().strip('"')
+    key = os.environ.get("RW_PRO", "").strip().strip("\"'\u201c\u201d\u2018\u2019")
     if not key:
         raise RuntimeError("RW_PRO (Robot Wealth API key) is not set in the environment")
     return key
