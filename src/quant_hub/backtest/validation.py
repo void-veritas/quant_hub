@@ -158,7 +158,7 @@ def compare_variants(
 def regime_table(
     returns: pd.Series, benchmark: pd.Series, window: int = 90, periods_per_year: int = 365
 ) -> pd.DataFrame:
-    """Return / Sharpe in bull vs bear regimes (sign of the trailing `window`-day benchmark return)."""
+    """Return / Sharpe in bull vs bear regimes (sign of trailing `window`-day benchmark return)."""
     bench = benchmark.reindex(returns.index).fillna(0.0)
     trailing = (1 + bench).rolling(window).apply(np.prod, raw=True) - 1
     regime = pd.Series(np.where(trailing.shift(1) >= 0, "bull", "bear"), index=returns.index)
