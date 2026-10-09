@@ -134,7 +134,8 @@ def test_capitalise_profits_compounds_sizing():
     weights = [[0.5, 0.0]] * 3
     a = _two_assets(prices, weights, initial_cash=1000.0, capitalise_profits=False)
     b = _two_assets(prices, weights, initial_cash=1000.0, capitalise_profits=True)
-    # after +20% on half the book equity is 1100: fixed sizing keeps 500 notional, compounding goes to 550
+    # after +20% on half the book equity is 1100: fixed sizing keeps 500 notional,
+    # compounding goes to 550
     assert a.position_value.iloc[1, 0] == pytest.approx(500.0)
     assert b.position_value.iloc[1, 0] == pytest.approx(550.0)
     # a drawdown shrinks both: min(initial, equity)
@@ -160,7 +161,7 @@ def test_margin_call_frees_the_shortfall_plus_five_percent():
         [[100, 100], [95, 100], [95, 100]], [[9.0, 0.0]] * 3, initial_cash=1000.0, margin=0.1
     )
     assert bool(res3.margin_call.iloc[1])
-    kept = 1 - min(1.0, 1.05 * 305 / 855)
+    # kept fraction is 1 - min(1, 1.05 * 305 / 855) = 62.6% of the position
     # the liquidation trade shows in the trades ledger (negative) before the day's rebalance
     assert res3.trades.iloc[1, 0] < 0
     assert res3.cash.iloc[1] >= 0.0
