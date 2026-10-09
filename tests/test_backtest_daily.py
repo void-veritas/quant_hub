@@ -151,12 +151,12 @@ def test_margin_call_frees_the_shortfall_plus_five_percent():
     assert bool(res.margin_call.iloc[1])
     # all equity is gone (and more): the whole position is liquidated (fraction capped at 1)
     assert res.equity.iloc[1] <= 0.0 + 1e-9 or res.positions.iloc[1, 0] == 0.0
-    # partial case: 2x long, price -8%: equity 1000 - 160 = 840, maint 0.1*1840=184 -> cash 656, no call
+    # partial case: 2x long, price -8%: equity 840, maint 184 -> cash 656, no call
     res2 = _two_assets(
         [[100, 100], [92, 100], [92, 100]], [[2.0, 0.0]] * 3, initial_cash=1000.0, margin=0.1
     )
     assert not res2.margin_call.any()
-    # 9x long, price -5%: pnl -450, equity 550, maint 0.1*9*950=855 -> cash -305: sell 1.05*305/855 = 37.4%
+    # 9x long, price -5%: pnl -450, equity 550, maint 855 -> cash -305: sell 37.4%
     res3 = _two_assets(
         [[100, 100], [95, 100], [95, 100]], [[9.0, 0.0]] * 3, initial_cash=1000.0, margin=0.1
     )
@@ -187,7 +187,7 @@ def test_nan_price_closes_position_at_last_price():
 
 
 def test_min_notional_skips_small_opens_but_allows_closes():
-    # $1k book, weight 0.004 -> $4 order < $10 minimum: stays flat; closing a position is always allowed
+    # $1k book, weight 0.004 -> $4 order < $10 minimum: stays flat; closes always allowed
     prices = [[100, 100]] * 3
     weights = [[0.004, 0.5], [0.004, 0.5], [0.0, 0.0]]
     res = _two_assets(prices, weights, initial_cash=1000.0, min_notional=10.0)
