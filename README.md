@@ -125,7 +125,35 @@ inst    = load_instruments(exchange="binance", status="trading")             # i
 
 Notes: all timestamps UTC with bar OPEN time convention; the `funding` dataset's
 columns differ per venue (Binance has `mark_price`, HL has `premium`); Binance OI
-dumps exist since ~2021-12; HL deep candle history (S3 archive) not wired up yet.
+dumps exist since ~2021-12.
+
+### Hyperliquid L2 archive (`data/connectors/hl_archive.py`, dataset `hl_l2_hour`)
+
+`hyperliquid-archive` S3 bucket (requester pays, AWS keys in env): 20-level L2
+snapshots every ~0.55 s since 2023-04-15. `ingestion l2hour --assets A,B --hour 9`
+summarises one hour per day per asset (first/median mid, spread in bps, depth
+within 10/25/50 bps in base units) so a daily-rebalance strategy gets a true
+decision-time price and spread without storing the raw book.
+
+### Robot Wealth API (`data/connectors/robotwealth.py`, key in env `RW_PRO`)
+
+`yolo_weights/factors/volatilities/historical(days)` for live and year-long
+reference values of the YOLO strategy; `list_datasets()` + `download_dataset()`
+for the bulk files (`coincodex.marketcap`, `binance.perps` funding/ohlcv-1h,
+served from `cdn.data.robotwealth.com`); `binance_perps_funding(gte, lte)` for
+funding newer than the Vision monthly dumps. Downloads go to `data/external/rw/`.
+
+### Mirror on S3 (`data/sync.py`)
+
+The raw and external layers are mirrored to `s3://yolo-research-ep` (us-east-1):
+
+```
+uv run python -m quant_hub.data.sync pull --bucket yolo-research-ep   # fresh container: minutes, not hours
+uv run python -m quant_hub.data.sync push --bucket yolo-research-ep   # after every backfill
+```
+
+`push`/`pull` copy only files missing or differing in size; `--dataset` limits to
+one dataset. Same AWS keys as the HL archive.
 
 ## Research toolkit
 
