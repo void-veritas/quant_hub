@@ -16,6 +16,20 @@ community's Excel helper actually trades. Semantics per period t:
 5. If post-trade cash would fall below maintenance margin, all targets are
    scaled down proportionally (0.95 x the affordable notional), as in rsims.
 
+Where this port deliberately departs from rsims:
+- Margin call: rsims computes `liquidate_factor = 1.05 (maint + cash) / maint`
+  (the fraction to KEEP, not to sell) and then references an undefined variable,
+  so the branch can never have run in their simulations. Here a margin call sells
+  the same fraction f = min(1, 1.05 (-cash) / maint) of every position, which
+  frees exactly the margin shortfall plus 5%.
+- A NaN price while a position is open (delisting) closes the position at the
+  last known price instead of silently zeroing it.
+- Optional venue constraints for small accounts: `min_notional` (an order below
+  it is skipped unless it closes the position) and per-asset `lot_sizes`
+  (positions rounded towards zero to the lot step).
+- Optional `trade_prices`: fills happen at these prices while PnL and signal use
+  `prices` (execution lag: decide at 09:00, fill at 10:00).
+
 Inputs are wide DataFrames indexed by date with identical columns (one per
 asset): prices, target_weights (date-aligned with prices: the weight you trade
 into at price_t), funding_rates. NaN prices with non-zero weights are an error;
@@ -28,6 +42,32 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+
+
+def apply_venue_constraints(
+    current_positions: np.ndarray,
+    target_positions: np.ndarray,
+    prices: np.ndarray,
+    min_notional: float = 0.0,
+    lot_sizes: np.ndarray | None = None,
+) -> np.ndarray:
+    """Round targets to the lot step (towards zero) and drop orders below `min_notional`.
+
+    An order that closes the position entirely is always allowed (reduce-only
+    closes are exempt from the minimum on Hyperliquid); any other order whose
+    notional is below the minimum is skipped and the current position stays.
+    """
+    tgt = target_positions.copy()
+    if lot_sizes is not None:
+        step = np.where(lot_sizes > 0, lot_sizes, np.nan)
+        rounded = np.trunc(tgt / step) * step
+        tgt = np.where(np.isnan(step), tgt, rounded)
+    if min_notional > 0:
+        order_value = np.abs((tgt - current_positions) * prices)
+        closes = tgt == 0.0
+        small = (order_value < min_notional) & ~closes & (order_value > 0)
+        tgt = np.where(small, current_positions, tgt)
+    return tgt
 
 
 def positions_from_buffer(
@@ -126,6 +166,9 @@ def run_backtest(
     margin: float = 0.05,
     commission_pct: float = 0.0,
     capitalise_profits: bool = False,
+    trade_prices: pd.DataFrame | None = None,
+    min_notional: float = 0.0,
+    lot_sizes: dict[str, float] | pd.Series | None = None,
 ) -> BacktestResult:
     """Run the daily rebalance simulation. See module docstring for semantics."""
     if trade_buffer < 0:
@@ -141,7 +184,17 @@ def run_backtest(
     ):
         raise ValueError("prices and funding_rates must share index and columns")
 
+    if trade_prices is None:
+        trade_prices = prices
+    elif not trade_prices.index.equals(prices.index) or list(trade_prices.columns) != list(
+        prices.columns
+    ):
+        raise ValueError("trade_prices must share index and columns with prices")
+    lots = None
+    if lot_sizes is not None:
+        lots = np.array([float(pd.Series(lot_sizes).get(c, 0.0) or 0.0) for c in prices.columns])
     P = prices.to_numpy(dtype=float)
+    TP = trade_prices.to_numpy(dtype=float)
     W = target_weights.to_numpy(dtype=float)
     F = np.nan_to_num(funding_rates.to_numpy(dtype=float))
     bad = np.isnan(P) & (np.nan_to_num(W) != 0)
@@ -161,9 +214,12 @@ def run_backtest(
 
     for t in range(T):
         px = P[t]
-        px0 = np.where(np.isnan(px), 0.0, px)  # NaN price: position must be 0 anyway
+        # NaN price with an open position (delisting): mark and close at the last known price
+        gone = np.isnan(px) & (pos != 0)
+        px_eff = np.where(gone, prev_px, px)
+        px0 = np.where(np.isnan(px_eff), 0.0, px_eff)
         fund = np.nan_to_num(pos * px0 * F[t])
-        pnl = np.nan_to_num(pos * (px - prev_px)) + fund
+        pnl = np.nan_to_num(pos * (px_eff - prev_px)) + fund
         cash = cash + pnl.sum() + maint - margin * np.abs(pos * px0).sum()
         maint = margin * np.abs(pos * px0).sum()
 
@@ -171,11 +227,10 @@ def run_backtest(
         liq = np.zeros(N)
         liq_val = np.zeros(N)
         liq_com = np.zeros(N)
-        if cash < 0:  # rsims: cash + maint < maint
+        if cash < 0 and maint > 0:  # rsims condition: cash + maint < maint
             margin_call = True
-            factor = 1.05 * (maint + cash) / maint if maint > 0 else 1.0
-            liq = np.sign(pos) * np.minimum(np.abs(pos), factor * np.abs(pos))
-            liq = np.where(np.abs(liq) > np.abs(pos), pos, liq)
+            frac = min(1.0, 1.05 * (-cash) / maint)  # sell this share of every position
+            liq = frac * pos
             liq_val = liq * px0
             liq_com = np.abs(liq_val) * commission_pct
             pos = pos - liq
@@ -185,25 +240,32 @@ def run_backtest(
         equity = cash + maint
         cap_equity = equity if capitalise_profits else min(initial_cash, equity)
 
+        tpx = np.where(np.isnan(TP[t]) | gone, px0, TP[t])  # fill price; last price if delisted
         target = positions_from_buffer(
             pos, px0, W[t], cap_equity, trade_buffer, buffer_mode, trade_to
         )
+        target = np.where(gone, 0.0, target)
+        target = apply_venue_constraints(pos, target, tpx, min_notional, lots)
         trades = target - pos
-        trade_value = trades * px0
+        trade_value = trades * tpx
         com = np.abs(trade_value) * commission_pct
-        post_cash = cash + maint - margin * np.abs(target * px0).sum() - com.sum()
+        # a fill away from the mark price is realised immediately (futures-style cash accounting)
+        slip = (trades * (px0 - tpx)).sum()
+        post_cash = cash + maint + slip - margin * np.abs(target * px0).sum() - com.sum()
 
         reduced = False
         if post_cash < maint:
             reduced = True
-            max_notional = 0.95 * (cash + maint - com.sum()) / margin
+            max_notional = 0.95 * (cash + maint + slip - com.sum()) / margin
             gross = np.abs(target * px0).sum()
             scale = max_notional / gross if gross > 0 else 0.0
             target = target * max(scale, 0.0)
+            target = apply_venue_constraints(pos, target, tpx, min_notional, lots)
             trades = target - pos
-            trade_value = trades * px0
+            trade_value = trades * tpx
             com = np.abs(trade_value) * commission_pct
-            post_cash = cash + maint - margin * np.abs(target * px0).sum() - com.sum()
+            slip = (trades * (px0 - tpx)).sum()
+            post_cash = cash + maint + slip - margin * np.abs(target * px0).sum() - com.sum()
 
         pos = target
         cash = post_cash
@@ -218,7 +280,7 @@ def run_backtest(
         out["pnl"][t] = pnl
         cash_s[t], margin_s[t], eq_s[t] = cash, maint, cash + maint
         mc_s[t], rt_s[t] = margin_call, reduced
-        prev_px = px
+        prev_px = np.where(np.isnan(px), prev_px, px)
 
     idx, cols = prices.index, prices.columns
     wide = {k: pd.DataFrame(v, index=idx, columns=cols) for k, v in out.items()}
