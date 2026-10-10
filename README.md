@@ -157,6 +157,19 @@ one dataset. Same AWS keys as the HL archive.
 
 ## Research toolkit
 
+Panel tools for daily cross-sectional books (long frames `date, asset, ...`), moved
+in from the YOLO research repo (M6):
+
+| Module | Purpose |
+|---|---|
+| `universe.cap_universe / liquidity_universe` | point-in-time universes (yesterday's market-cap rank, trailing dollar volume) |
+| `portfolio.neutral.rolling_betas / neutralise` | lagged betas to the EW basket; dollar / beta / hedge neutralisation |
+| `portfolio.pit_construction.build` | vol target, mean-variance (Ledoit-Wolf / Marchenko-Pastur), HRP on point-in-time covariances |
+| `attribution.panel_attribution` | PnL by weight source (with overlay), time-series and cross-sectional factor attribution |
+| `backtest.validation` | walk-forward, purged k-fold, CPCV, variant table with Rademacher terms, regime table |
+| `backtest.engines.daily_rebalance` | rsims-style daily rebalance engine with venue constraints |
+
+
 The `risk`, `portfolio`, `alpha`, `attribution`, `costs`, and `backtest` packages
 are a factor-model-centred quant toolkit (full module map:
 [docs/toolkit_map.md](docs/toolkit_map.md)). Everything takes numpy/pandas and
