@@ -80,6 +80,40 @@ def cmd_instruments(_args) -> None:
     print(f"instruments table written ({len(df)} rows)\n{counts.to_string()}")
 
 
+def _ohlcv_binance_1d(inst: pd.DataFrame, start: date, end: date) -> None:
+    """Daily bars (dataset ohlcv_1d, binance): monthly dumps, daily files for the open month.
+
+    Daily klines carry taker_buy_volume / taker_buy_quote_volume, the aggressor
+    imbalance input (Robot Wealth's volume feature) at a fraction of the 15m cost.
+    """
+    today = bnc.utc_today()
+    daily_cutoff = min(end, today - timedelta(days=1))
+    for _, row in inst.iterrows():
+        asset, symbol = row["canonical_id"], row["symbol"]
+        have = _existing_ts("ohlcv_1d", "binance", asset)
+        n = 0
+        for year, month in bnc.month_range(start, end):
+            month_start = pd.Timestamp(year, month, 1, tz="UTC")
+            next_month = month_start + pd.offsets.MonthBegin(1)
+            if (year, month) == (today.year, today.month):
+                for day in bnc.day_range(max(start, date(year, month, 1)), daily_cutoff):
+                    if have[(have >= _utc(day)) & (have < _utc(day + timedelta(days=1)))].size:
+                        continue
+                    df = bnc.fetch_klines_day(symbol, "1d", day)
+                    if df is not None:
+                        storage.write_partition(df, "ohlcv_1d", "binance", asset)
+                        n += len(df)
+            else:
+                month_have = have[(have >= month_start) & (have < next_month)]
+                if month_have.size and month_have.max() >= next_month - pd.Timedelta(days=1):
+                    continue
+                df = bnc.fetch_klines_month(symbol, "1d", year, month)
+                if df is not None:
+                    storage.write_partition(df, "ohlcv_1d", "binance", asset)
+                    n += len(df)
+        print(f"ohlcv(1d) binance {asset:12s} +{n} rows", flush=True)
+
+
 def _ohlcv_binance(inst: pd.DataFrame, start: date, end: date) -> None:
     """Backfill 15m bars from bulk dumps: monthly zips, daily for the current month."""
     today = bnc.utc_today()
@@ -161,7 +195,10 @@ def cmd_ohlcv(args) -> None:
     start = date.fromisoformat(args.start) if args.start else DEFAULT_START[args.exchange]
     end = date.fromisoformat(args.end) if args.end else bnc.utc_today()
     if args.exchange == "binance":
-        _ohlcv_binance(inst, start, end)
+        if args.interval == "1d":
+            _ohlcv_binance_1d(inst, start, end)
+        else:
+            _ohlcv_binance(inst, start, end)
     else:
         if args.interval == "1d":
             start = date.fromisoformat(args.start) if args.start else date(2020, 1, 1)
@@ -338,7 +375,7 @@ def main() -> None:
             "(needs SCRAPING_BEE_KEY; spares the local IP's venue rate limits)",
         )
 
-    ohlcv = sub.add_parser("ohlcv", help="backfill bars (15m; hyperliquid also 1d)")
+    ohlcv = sub.add_parser("ohlcv", help="backfill bars (15m; 1d on both venues)")
     _add_common(ohlcv, ["binance", "hyperliquid"])
     ohlcv.add_argument("--interval", choices=["15m", "1d"], default="15m")
     funding = sub.add_parser("funding", help="backfill funding")
