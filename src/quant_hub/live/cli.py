@@ -82,9 +82,8 @@ def cmd_validate(args) -> int:
         return 1
     wf = WeightsFile.from_json(raw.decode())
     problems = validate_weights(wf, book, datetime.now(UTC))
-    print(
-        f"{len(wf.weights)} names, gross {wf.gross:.3f}, net {wf.net:+.3f}, produced {wf.produced_at}"
-    )
+    print(f"{len(wf.weights)} names, gross {wf.gross:.3f}, net {wf.net:+.3f}")
+    print(f"produced {wf.produced_at}")
     for p in problems:
         print("PROBLEM:", p)
     return 1 if problems else 0
