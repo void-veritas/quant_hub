@@ -54,3 +54,15 @@ explanation, realised-PnL attribution, and dynamic exposure, see
 Multi-period impact MPC (EQI Ch11 finite-horizon), currency rebasing & model
 linking (EQI Ch6 ★), DCC/STVU dynamic factor-cov updating, 13f-crowding and
 borrow-rate factors — implement if a strategy needs them.
+
+## Added after the YOLO work (M5–M7), not from the Paleologo summaries
+
+| Module | Contents |
+|---|---|
+| `universe.py` | point-in-time market-cap and liquidity universes (yesterday's rank, smoothing, minimum history, extension by price ratios) |
+| `portfolio/neutral.py` | lagged rolling betas to the equal-weight basket; dollar, beta and hedge neutralisation |
+| `portfolio/pit_construction.py` | point-in-time covariances (sample, Ledoit–Wolf, Marchenko–Pastur), vol targeting, MV and HRP weights |
+| `backtest/engines/daily_rebalance.py` | rsims-style daily engine: funding, commissions, no-trade buffer, margin call, delisting, venue lots and minimums |
+| `backtest/validation.py` | walk-forward, purged k-fold, CPCV paths, variant comparison with Rademacher terms, regime tables |
+| `attribution/panel_attribution.py` | PnL by weight source with overlay, time-series and cross-sectional factor attribution on long panels |
+| `live/` | production execution layer (see README "Layout") |

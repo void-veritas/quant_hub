@@ -16,31 +16,30 @@ The `quant_hub` package is installed editable, so it's importable from notebooks
 
 ```
 src/quant_hub/
-  data/          ingestion, loaders, storage, validation
-    connectors/  hyperliquid, binance, ccxt
-    assets/      prices, funding, open interest
+  data/          ingestion CLI, loaders (DuckDB), partitioned storage, validation, S3 sync
+    connectors/  hyperliquid (API), hl_archive (S3 L2), binance (Vision dumps), robotwealth (API), scrapingbee
+  universe.py    point-in-time universes (market cap, liquidity)
   alpha/         signals, features, momentum, funding signals
-  indicators/    technical, volatility, market structure
-  backtest/      metrics, multiple_testing, blotter
-    engines/     vectorized, event-driven
-    strategies/  base, momentum, funding carry, hyperliquid btc
-  portfolio/     construction, sizing, positions, constraints
-  risk/          volatility, covariance, factor_model, hedging,
-                 exposures, leverage, drawdown, liquidation
-  costs/         fees, slippage, funding
-  execution/     orders, paper broker
-  attribution/   factor attribution, performance, pnl decomposition
-  reporting/     charts, tables, reports
-  utils/         config, dates, logging, state_space
+  risk/          volatility, covariance, factor_model, hedging, exposures, leverage, drawdown
+  portfolio/     construction, sizing, neutral (betas, neutralisation), pit_construction (vol target, MV, HRP)
+  backtest/      metrics, multiple_testing, validation (WF, purged k-fold, CPCV); engines/daily_rebalance
+  costs/         slippage (impact models)
+  attribution/   factor attribution, performance, panel_attribution (by weight source, TS/CS)
+  live/          production execution: contracts, store, OMS, risk, policy, engine, adapters, notifier, cli
+  utils/         config (.env), state_space (Kalman)
 
-data/            raw -> interim -> processed (contents gitignored)
-docs/            book summaries, toolkit_map.md, design notes
-notebooks/       exploratory work
-research_memos/  written-up findings
-reports/         generated figures and tables (gitignored)
-config/          strategy/run configuration
-tests/           pytest suite
+config/          instruments.csv (asset registry), hl_lot_sizes.json
+data/            raw -> external (contents gitignored; catalogue in data/README.md)
+docs/            toolkit_map.md (Paleologo results -> modules), single_factor_testing_pipeline.md
+tests/           pytest (toolkit invariants, data layer, backtester semantics, validation, PIT, live scenarios)
 ```
+
+Strategy research that uses this toolkit lives in `void-veritas/yolo-microstructure`
+(`yolo/` pipeline, `research/`, `prod/`); the production design and runbook are there
+(`prod/README.md`, `prod/RUNBOOK.md`). The live layer here is strategy-agnostic:
+a *book* passport (`live.contracts.Book`), a weights file per day, and `live.engine.Session`
+that trades it on an adapter (`paper`, `fake` for tests, `hyperliquid`). Run
+`python -m quant_hub.live --help`.
 
 The research toolkit (`risk`, `portfolio`, `alpha`, `attribution`, `costs`,
 `backtest`) implements the math from two Paleologo texts, mapped module-by-module
