@@ -538,3 +538,19 @@ def test_cli_flags_and_validate(tmp_path, monkeypatch):
     assert main(["resume", "--book", str(bk)]) == 0
     assert not (tmp_path / "store" / "flags" / "yolo_daily" / "pause").exists()
     assert main(["validate", "--book", str(bk), "--date", AS_OF]) == 1  # no file
+
+
+def test_relative_trade_buffer_skips_small_deltas(tmp_path):
+    store, clock, ex = setup(tmp_path, {"BTC": 0.2, "ETH": -0.2})
+    ex.positions = {"BTC": 0.0195, "ETH": -0.6}  # BTC within 10% of target, ETH far from it
+    ex._cost_basis = {"BTC": 0.0195 * 100_000, "ETH": -0.6 * 4_000}
+    bk = book(trade_buffer=0.10, tick_seconds=20.0)
+
+    def drift(now):
+        if now >= START + timedelta(minutes=1):
+            ex.set_quotes({"ETH": Quote(4_010.0, 4_012.0)})
+
+    clock.on_advance = drift
+    s = run(session(bk, store, ex, clock))
+    assert s.status == "done" and {o.coin for o in ex.placed} == {"ETH"}
+    assert ex.positions["BTC"] == 0.0195

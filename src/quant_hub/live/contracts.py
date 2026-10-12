@@ -45,6 +45,7 @@ class Book:
     )
     cross_after_minutes: int = 30  # remaining quantity goes IOC after this
     reprice_seconds: int = 60
+    trade_buffer: float = 0.0  # relative no-trade zone: skip when |target-pos| <= buffer*|target|
     reprice_tolerance_bps: float = 5.0  # re-quote when the resting price drifts from mid by more
     maker_fee: float = 0.00015
     taker_fee: float = 0.00045

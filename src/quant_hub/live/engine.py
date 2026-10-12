@@ -158,6 +158,9 @@ class Session:
             w = wf.weights.get(coin, 0.0)
             raw = w * capital / q.mid
             size = round_size(abs(raw), decimals.get(coin, 0)) * (1 if raw >= 0 else -1)
+            pos = self.start_positions.get(coin, 0.0)
+            if self.book.trade_buffer > 0 and abs(size - pos) <= self.book.trade_buffer * abs(size):
+                size = pos  # inside the no-trade zone (note 016: relative buffer, trade to target)
             self.targets[coin] = size
         self.planned_net = sum(
             (t - self.start_positions.get(c, 0.0)) * self.decision_px[c]
