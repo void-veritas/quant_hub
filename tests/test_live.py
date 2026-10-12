@@ -462,3 +462,79 @@ def test_policy_skips_dust_and_blind_coins():
         1.0,
     )
     assert plan.send == []  # BTC below $10, ETH has no quote
+
+
+# ---------------------------------------------------------------- hyperliquid parsing
+
+
+def test_hyperliquid_parsers():
+    from quant_hub.live.adapters.hyperliquid import (
+        parse_fill,
+        parse_order_update,
+        parse_place_response,
+    )
+
+    f = parse_fill(
+        {
+            "coin": "SOL",
+            "px": "150.1",
+            "sz": "2.5",
+            "side": "B",
+            "time": 1760259600000,
+            "oid": 123,
+            "cloid": "0x" + "1" * 32,
+            "tid": 777,
+            "fee": "0.05",
+            "crossed": False,
+        }
+    )
+    assert f.side == "buy" and f.liquidity == "maker" and f.fill_id == "777" and f.price == 150.1
+    assert parse_fill({"coin": "SOL", "px": "1", "sz": "1", "side": "A", "time": 0}) is None
+    u = parse_order_update(
+        {
+            "order": {
+                "coin": "SOL",
+                "oid": 123,
+                "cloid": "0x" + "1" * 32,
+                "origSz": "2.5",
+                "sz": "1.0",
+                "timestamp": 1760259600000,
+            },
+            "status": "open",
+            "statusTimestamp": 1760259600500,
+        }
+    )
+    assert u.status == "open" and u.filled_size == 1.5 and u.remaining_size == 1.0
+    ok = parse_place_response(
+        {"status": "ok", "response": {"data": {"statuses": [{"resting": {"oid": 5}}]}}}
+    )
+    assert ok.ok and ok.oid == "5"
+    err = parse_place_response(
+        {
+            "status": "ok",
+            "response": {"data": {"statuses": [{"error": "Post only order would have crossed"}]}},
+        }
+    )
+    assert not err.ok and "crossed" in err.error
+    filled = parse_place_response(
+        {
+            "status": "ok",
+            "response": {
+                "data": {"statuses": [{"filled": {"oid": 9, "totalSz": "2.5", "avgPx": "150"}}]}
+            },
+        }
+    )
+    assert filled.ok and filled.filled_size == 2.5
+
+
+def test_cli_flags_and_validate(tmp_path, monkeypatch):
+    from quant_hub.live.cli import main
+
+    monkeypatch.setenv("LIVE_STORE", str(tmp_path / "store"))
+    bk = tmp_path / "book.yaml"
+    bk.write_text("book_id: yolo_daily\n")
+    assert main(["pause", "--book", str(bk)]) == 0
+    assert (tmp_path / "store" / "flags" / "yolo_daily" / "pause").exists()
+    assert main(["resume", "--book", str(bk)]) == 0
+    assert not (tmp_path / "store" / "flags" / "yolo_daily" / "pause").exists()
+    assert main(["validate", "--book", str(bk), "--date", AS_OF]) == 1  # no file
