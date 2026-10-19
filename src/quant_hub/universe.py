@@ -97,27 +97,19 @@ def normalise_ticker(t: str, known: set[str] | None = None) -> str:
     return t
 
 
-def cap_universe(
+def cap_series(
     mc: pd.DataFrame,
-    n: int = 10,
     smooth: int = 7,
     min_history: int = 30,
     exclude: frozenset[str] = STABLECOINS | DUPLICATES,
     known: set[str] | None = None,
     extend_prices: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Long frame (date, asset, in_universe): RW's rule, top-n by market cap on the previous day.
+    """Wide (date x asset) market-cap series as used for ranking by :func:`cap_universe`.
 
-    RW (crypto-pod notebook 1): drop stablecoins and duplicate/wrapped coins, rank
-    `MarketCapUSD` within each date, member on date d iff rank on d-1 <= n.
-    Robustness added here because the coincodex snapshot has days where large
-    coins carry a missing cap: the cap is forward-filled up to 3 days and replaced
-    by its `smooth`-day rolling median before ranking, and a ticker needs
-    `min_history` days of data before it can rank. Point-in-time by construction.
-
-    `extend_prices` (long: ts/date, asset, close) extends the cap series past the
-    snapshot's last date as cap_last × close_t / close_last (supply held fixed),
-    so the rule keeps running on live prices when the cap file is stale.
+    Same cleaning as the universe rule (exclusions, forward-fill up to 3 days, rolling
+    median, minimum history, extension past the snapshot by price ratios); exposed so
+    that a risk model can use the identical point-in-time size measure.
     """
     m = mc[["Ticker", "Date", "MarketCapUSD"]].copy()
     m["Date"] = pd.to_datetime(m["Date"])
@@ -152,6 +144,32 @@ def cap_universe(
     cap = wide.rolling(smooth, min_periods=max(1, smooth // 2)).median()
     history = wide.notna().cumsum()
     cap = cap.where(history >= min_history)
+    return cap
+
+
+def cap_universe(
+    mc: pd.DataFrame,
+    n: int = 10,
+    smooth: int = 7,
+    min_history: int = 30,
+    exclude: frozenset[str] = STABLECOINS | DUPLICATES,
+    known: set[str] | None = None,
+    extend_prices: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Long frame (date, asset, in_universe): RW's rule, top-n by market cap on the previous day.
+
+    RW (crypto-pod notebook 1): drop stablecoins and duplicate/wrapped coins, rank
+    `MarketCapUSD` within each date, member on date d iff rank on d-1 <= n.
+    Robustness added here because the coincodex snapshot has days where large
+    coins carry a missing cap: the cap is forward-filled up to 3 days and replaced
+    by its `smooth`-day rolling median before ranking, and a ticker needs
+    `min_history` days of data before it can rank. Point-in-time by construction.
+
+    `extend_prices` (long: ts/date, asset, close) extends the cap series past the
+    snapshot's last date as cap_last × close_t / close_last (supply held fixed),
+    so the rule keeps running on live prices when the cap file is stale.
+    """
+    cap = cap_series(mc, smooth, min_history, exclude, known, extend_prices)
     rank = cap.rank(axis=1, ascending=False, method="first")
     member = (rank <= n).shift(1).fillna(False).astype(bool)  # yesterday's rank decides today
     out = member.stack(future_stack=True).rename("in_universe").reset_index()
