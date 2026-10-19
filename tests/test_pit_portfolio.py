@@ -131,3 +131,27 @@ def test_project_out_zeroes_style_loadings():
     for _, g in df.groupby("date"):
         assert abs((g["w2"] * g["size"]).sum()) < 1e-9 and abs((g["w2"] * g["vol"]).sum()) < 1e-9
     assert out.abs().max() <= 0.25 + 1e-12
+
+
+def test_hmm_regime_multipliers_flag_the_high_variance_segment():
+    import numpy as np
+    import pandas as pd
+
+    from quant_hub.portfolio.pit_construction import hmm_regime_multipliers
+
+    rng = np.random.default_rng(3)
+    n = 700
+    vol = np.where((np.arange(n) >= 450) & (np.arange(n) < 550), 0.04, 0.01)
+    dates = pd.date_range("2024-01-01", periods=n, freq="D")
+    rows = []
+    for i, d in enumerate(dates):
+        for a in range(5):
+            rows.append(
+                dict(date=d, asset=f"A{a}", price_returns=rng.normal(0, vol[i]), funding=0.0)
+            )
+    panel = pd.DataFrame(rows)
+    m = hmm_regime_multipliers(panel, refit_every=21, min_history=300)
+    calm = m[(m.index >= dates[300]) & (m.index < dates[450])]
+    hot = m[(m.index >= dates[460]) & (m.index < dates[550])]
+    after = m[m.index >= dates[570]]
+    assert (calm == 1.0).mean() > 0.95 and (hot == 0.5).mean() > 0.8 and (after == 1.0).mean() > 0.9

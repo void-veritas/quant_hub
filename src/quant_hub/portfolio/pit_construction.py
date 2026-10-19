@@ -88,6 +88,57 @@ def cap_risk_share(w: np.ndarray, cov: np.ndarray, max_share: float, iters: int 
     return w
 
 
+def hmm_regime_multipliers(
+    panel: pd.DataFrame,
+    refit_every: int = 21,
+    min_history: int = 250,
+    threshold: float = 0.5,
+    scale: float = 0.5,
+    min_variance_ratio: float = 2.0,
+) -> pd.Series:
+    """Per-date multiplier from a two-state Markov-switching variance model (EQI Ch 2 / HMM).
+
+    The model (statsmodels ``MarkovRegression``, switching variance) is refitted every
+    ``refit_every`` days on the equal-weighted universe return strictly before the
+    date; between refits the filtered probability of the high-variance state is
+    updated with the fixed parameters. Multiplier ``scale`` when that probability
+    exceeds ``threshold``, else 1. When the two fitted variances differ by less than
+    ``min_variance_ratio`` the states are not identified (typically before the first
+    high-vol episode in the history) and the multiplier stays 1. Point in time by
+    construction.
+    """
+    from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
+
+    r = _returns_wide(panel)
+    mkt = r.mean(axis=1, skipna=True).dropna()
+    x = mkt.to_numpy()
+    mult = pd.Series(1.0, index=mkt.index)
+    params = None
+    for i in range(min_history, len(x), refit_every):
+        try:
+            fit = MarkovRegression(x[:i], k_regimes=2, switching_variance=True).fit(
+                disp=False, maxiter=200
+            )
+            params = fit.params
+        except Exception:  # noqa: BLE001 - keep the previous parameters on a failed refit
+            if params is None:
+                continue
+        end = min(i + refit_every, len(x))
+        # filter the history through end-1 with the parameters known at i; each day's
+        # filtered probability uses returns up to and including that day (known next morning)
+        model = MarkovRegression(x[:end], k_regimes=2, switching_variance=True)
+        probs = model.filter(params).filtered_marginal_probabilities
+        variances = np.asarray(params[-2:], float)
+        high = int(np.argmax(variances))  # the state with the larger variance
+        sel = mkt.index[i:end]
+        if variances.max() < min_variance_ratio * variances.min():
+            mult.loc[sel] = 1.0  # states not separated (no high-vol episode seen yet): do nothing
+            continue
+        p_high = pd.Series(probs[:, high], index=mkt.index[:end]).shift(1)  # known at the decision
+        mult.loc[sel] = np.where(p_high.loc[sel] > threshold, scale, 1.0)
+    return mult
+
+
 def regime_scale(
     panel: pd.DataFrame,
     window: int = 30,
@@ -170,7 +221,12 @@ def build(
     :func:`regime_scale`) multiplies the target vol by the state multiplier.
     """
     ret = _returns_wide(panel)
-    mult = regime_scale(panel, **regime) if regime else None
+    mult = None
+    if regime:
+        regime = dict(regime)
+        mult = regime.pop("multipliers", None)  # precomputed per-date multipliers win
+        if mult is None:
+            mult = regime_scale(panel, **regime)
     out = pd.Series(np.nan, index=panel.index, name="scaled_weight")
     for date, idx in panel.groupby("date").indices.items():
         rows = panel.iloc[idx]
