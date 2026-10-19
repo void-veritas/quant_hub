@@ -66,3 +66,15 @@ borrow-rate factors — implement if a strategy needs them.
 | `backtest/validation.py` | walk-forward, purged k-fold, CPCV paths, variant comparison with Rademacher terms, regime tables |
 | `attribution/panel_attribution.py` | PnL by weight source with overlay, time-series and cross-sectional factor attribution on long panels |
 | `live/` | production execution layer (see README "Layout") |
+
+## Added in M8 (PCRM / Vorobets, Steiner, Palomar, López de Prado), 2026-10-19
+
+| Module | Contents | Source |
+|---|---|---|
+| `risk/panel_risk_model.py` | point-in-time style risk model on long panels: daily WLS on market + size/vol/liquidity/momentum/funding, EWMA factor and idio variances, predicted portfolio vol, Barra bias statistic, PnL attribution factor vs residual | EQI Ch 4–7, Barra |
+| `risk/tail.py` | VaR/CVaR on scenarios (Rockafellar–Uryasev), Euler CVaR contributions, Entropy Pooling views (mean, second moment, probability) and stress tables via `fortitudo.tech` | PCRM Ch 5–7 |
+| `backtest/metrics.py` (additions) | moment ratios (skew, kurtosis), Mertens standard error, PSR, DSR, circular block-bootstrap Sharpe CI | Mertens 2002; Bailey & López de Prado |
+| `backtest/simulation.py` | block-bootstrap and state-conditioned resampled paths, path statistics, effective history | PCRM Ch 3 (time- and state-dependent resampling, simplified) |
+| `portfolio/pit_construction.py` (additions) | EWMA covariance option, Euler variance-share cap, market-vol regime multiplier of the target vol | Steiner essays 4, 6; PCRM 6.3 |
+| `portfolio/neutral.py` (addition) | `project_out`: zero the portfolio's loadings on chosen style exposures | EQI Ch 10 (factor-neutral) |
+| `data/health.py`, `data/sync.py` | data-layer health report; content-based S3 mirror with local-change protection | — |

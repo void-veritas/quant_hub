@@ -190,6 +190,9 @@ in from the YOLO research repo (M6):
 | `attribution.panel_attribution` | PnL by weight source (with overlay), time-series and cross-sectional factor attribution |
 | `backtest.validation` | walk-forward, purged k-fold, CPCV, variant table with Rademacher terms, regime table |
 | `backtest.engines.daily_rebalance` | rsims-style daily rebalance engine with venue constraints |
+| `risk.panel_risk_model` | style risk model on the panel (market + size/vol/liquidity/momentum/funding): predicted vol, bias statistic, PnL attribution factor vs residual |
+| `risk.tail` | CVaR, Euler CVaR contributions, Entropy Pooling stress tests (`fortitudo.tech`) |
+| `backtest.simulation` + `backtest.metrics` | resampled paths (block / state-conditioned), Mertens CI, PSR, DSR, block bootstrap |
 
 
 The `risk`, `portfolio`, `alpha`, `attribution`, `costs`, and `backtest` packages
