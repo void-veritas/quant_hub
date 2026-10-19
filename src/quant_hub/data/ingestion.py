@@ -170,7 +170,13 @@ def _fill_binance_day_gaps(asset: str, symbol: str, start: date, end: date) -> i
 
 
 def _ohlcv_hyperliquid(
-    inst: pd.DataFrame, start: date, end: date, interval: str = "15m", refresh: int = 2
+    inst: pd.DataFrame,
+    start: date,
+    end: date,
+    interval: str = "15m",
+    refresh: int = 2,
+    full: bool = False,
+    extend_back: bool = False,
 ) -> None:
     """Backfill bars from the HL API.
 
@@ -181,7 +187,11 @@ def _ohlcv_hyperliquid(
     The API also returns the bar that is still forming. It is never stored: a bar
     is kept only when its whole interval lies in the past. The last `refresh`
     stored bars are re-fetched and overwritten on every run, so a bar that was
-    revised at the venue is picked up on the next pull.
+    revised at the venue is picked up on the next pull. A `start` before the first
+    stored bar re-fetches from `start` when `extend_back` is set (an explicit
+    `--start`; the default start would refetch everything on every run); `full`
+    ignores the stored state and re-fetches [start, end] (the idempotent write
+    dedups), which is the way to repair holes inside the stored range.
     """
     dataset = "ohlcv_1d" if interval == "1d" else "ohlcv_15m"
     step = pd.Timedelta(days=1) if interval == "1d" else pd.Timedelta("15min")
@@ -190,7 +200,7 @@ def _ohlcv_hyperliquid(
         asset, symbol = row["canonical_id"], row["symbol"]
         have = _existing_ts(dataset, "hyperliquid", asset)
         fetch_from = _utc(start)
-        if have.size:
+        if have.size and not full and (fetch_from >= have.min() or not extend_back):
             fetch_from = max(fetch_from, (have.max() - refresh * step).to_pydatetime())
         df = hl.fetch_candles(symbol, interval, fetch_from, _utc(end + timedelta(days=1)))
         df = df[df["ts"] < closed_before]
@@ -213,7 +223,15 @@ def cmd_ohlcv(args) -> None:
     else:
         if args.interval == "1d":
             start = date.fromisoformat(args.start) if args.start else date(2020, 1, 1)
-        _ohlcv_hyperliquid(inst, start, end, interval=args.interval, refresh=args.refresh)
+        _ohlcv_hyperliquid(
+            inst,
+            start,
+            end,
+            interval=args.interval,
+            refresh=args.refresh,
+            full=args.full,
+            extend_back=bool(args.start),
+        )
 
 
 def cmd_funding(args) -> None:
@@ -329,7 +347,7 @@ def cmd_l2hour(args) -> None:
         print(f"l2hour hyperliquid {asset:12s} {len(todo)} days fetched", flush=True)
 
 
-FREQ = {"ohlcv_15m": "15min", "open_interest": "5min"}
+FREQ = {"ohlcv_15m": "15min", "ohlcv_1d": "1D", "open_interest": "5min"}
 
 
 def cmd_gaps(args) -> None:
@@ -395,6 +413,11 @@ def main() -> None:
         default=2,
         help="hyperliquid: re-fetch and overwrite the last N stored bars (default 2)",
     )
+    ohlcv.add_argument(
+        "--full",
+        action="store_true",
+        help="hyperliquid: ignore stored state and re-fetch [start, end] (repairs holes)",
+    )
     funding = sub.add_parser("funding", help="backfill funding")
     _add_common(funding, ["binance", "hyperliquid"])
     funding.add_argument(
@@ -417,7 +440,9 @@ def main() -> None:
     l2.add_argument("--dry-run", action="store_true", help="print the egress estimate and exit")
 
     gaps = sub.add_parser("gaps", help="report missing bars per asset")
-    gaps.add_argument("--dataset", choices=["ohlcv_15m", "funding", "open_interest"], required=True)
+    gaps.add_argument(
+        "--dataset", choices=["ohlcv_15m", "ohlcv_1d", "funding", "open_interest"], required=True
+    )
     gaps.add_argument("--exchange")
 
     args = parser.parse_args()

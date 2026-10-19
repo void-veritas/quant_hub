@@ -282,3 +282,90 @@ def test_health_report_flags_gaps_and_staleness(tmp_path):
     assert health.flag(df)["asset"].tolist() == ["ETH"]
     stale = health.report(root=tmp_path, now=now + pd.Timedelta(days=10))
     assert health.flag(stale, stale_days=3)["asset"].tolist() == ["BTC", "ETH"]
+
+
+def test_pull_merge_unions_conflicting_partitions(tmp_path):
+    import time
+
+    from quant_hub.data import sync
+
+    root = tmp_path / "data"
+    key = "raw/ohlcv_1d/exchange=hyperliquid/asset=BTC/year=2024/data.parquet"
+    f = root / key
+    f.parent.mkdir(parents=True)
+    # bucket holds days 1-5, the local machine backfilled days 4-8 with a revised day 4
+    remote = _bars("2024-01-01", 5, "1D")
+    local = _bars("2024-01-04", 5, "1D").assign(close=200.0)
+    remote.to_parquet(f, index=False)
+    s3 = _FakeS3()
+    assert sync.push("b", root=root, s3=s3) == 1
+    time.sleep(0.01)
+    local.to_parquet(f, index=False)
+    assert sync.pull("b", root=root, s3=s3) == 0  # conflict: kept local
+    assert sync.pull("b", root=root, s3=s3, merge=True) == 1
+    merged = pd.read_parquet(f)
+    assert len(merged) == 8 and merged["ts"].is_unique and merged["ts"].is_monotonic_increasing
+    assert merged.loc[merged["ts"] == pd.Timestamp("2024-01-04", tz="UTC"), "close"].item() == 200.0
+    assert sync.push("b", root=root, s3=s3) == 1  # the union goes back to the bucket
+
+
+def test_hl_ingest_backward_gap_and_full_refetch(tmp_path, monkeypatch):
+    from datetime import date
+
+    from quant_hub.data import ingestion
+
+    monkeypatch.setattr(storage, "RAW_ROOT", tmp_path)
+    monkeypatch.setattr(ingestion.time, "sleep", lambda s: None)
+    today = pd.Timestamp.now(tz="UTC").floor("D")
+    calls = []
+
+    def fake_candles(symbol, interval, start, end):
+        calls.append(pd.Timestamp(start))
+        ts = pd.date_range(today - pd.Timedelta(days=30), today, freq="1D", tz="UTC")
+        ts = ts[ts >= pd.Timestamp(start)]
+        return pd.DataFrame(
+            {
+                "ts": ts,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 1.0,
+                "trades": 1,
+                "symbol": symbol,
+            }
+        )
+
+    monkeypatch.setattr(ingestion.hl, "fetch_candles", fake_candles)
+    inst = pd.DataFrame({"canonical_id": ["BTC"], "symbol": ["BTC"]})
+    recent = (today - pd.Timedelta(days=10)).date()
+    ingestion._ohlcv_hyperliquid(inst, recent, date.today(), interval="1d")
+    # a start before the first stored bar is a backward gap: fetched from that start
+    early = (today - pd.Timedelta(days=20)).date()
+    ingestion._ohlcv_hyperliquid(inst, early, date.today(), interval="1d")
+    assert calls[-1] > pd.Timestamp(early, tz="UTC")  # default start: tail refresh only
+    ingestion._ohlcv_hyperliquid(inst, early, date.today(), interval="1d", extend_back=True)
+    assert calls[-1] == pd.Timestamp(early, tz="UTC")
+    stored = pd.read_parquet(
+        storage.partition_path("ohlcv_1d", "hyperliquid", "BTC", today.year, root=tmp_path)
+    )
+    assert stored["ts"].min() == pd.Timestamp(early, tz="UTC") and stored["ts"].is_unique
+    # --full ignores the stored state and refetches from start
+    ingestion._ohlcv_hyperliquid(inst, early, date.today(), interval="1d", full=True)
+    assert calls[-1] == pd.Timestamp(early, tz="UTC")
+
+
+def test_cross_venue_flags_mismatched_instruments(tmp_path):
+    from quant_hub.data import health
+
+    hl = _bars("2024-01-01", 20, "1D")
+    bn = hl.copy()
+    storage.write_partition(hl, "ohlcv_1d", "hyperliquid", "BTC", root=tmp_path)
+    storage.write_partition(bn, "ohlcv_1d", "binance", "BTC", root=tmp_path)
+    storage.write_partition(hl, "ohlcv_1d", "hyperliquid", "FTT", root=tmp_path)
+    storage.write_partition(
+        bn.assign(close=bn["close"] * 0.7), "ohlcv_1d", "binance", "FTT", root=tmp_path
+    )
+    cv = health.cross_venue(root=tmp_path).set_index("asset")
+    assert not cv.loc["BTC", "flagged"] and cv.loc["BTC", "off_days"] == 0
+    assert cv.loc["FTT", "flagged"] and cv.loc["FTT", "off_share"] == 1.0

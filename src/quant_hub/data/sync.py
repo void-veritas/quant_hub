@@ -10,7 +10,9 @@ plus external/ for third-party files. Files are compared by content: every uploa
 stores the file's SHA-256 in the object's metadata, and a file is copied only when it
 is missing on the destination or its hash differs. A local file that differs from the
 bucket and is newer than the bucket's copy is never overwritten by ``pull`` unless
-``--force`` is given (it is reported instead). ``push --force`` re-uploads everything.
+``--force`` is given (it is reported instead); ``pull --merge`` instead merges such a
+partition row by row (union on ``ts``, local rows win), which is the right call when
+two machines backfilled the same partition. ``push --force`` re-uploads everything.
 Credentials come from the environment or ``.env`` (AWS_ACCESS_KEY_ID / SECRET).
 """
 
@@ -141,12 +143,15 @@ def pull(
     force: bool = False,
     dry_run: bool = False,
     s3=None,
+    merge: bool = False,
 ) -> int:
     """Download bucket files that are missing locally or whose content differs.
 
     A local file that differs AND is newer than the bucket copy is left alone and
     listed, unless `force` is set: this protects a fresh local backfill from being
-    overwritten by an older mirror.
+    overwritten by an older mirror. With `merge`, such a raw parquet partition is
+    instead merged row by row with the bucket copy (union on `ts`, local rows win on
+    a duplicate timestamp); a following `push` then uploads the union.
     """
     s3 = s3 or _client()
     remote = _remote_index(s3, bucket, dataset)
@@ -163,6 +168,8 @@ def pull(
                 return None  # same content (or legacy object without a hash: assume same)
         local_newer = datetime.fromtimestamp(p.stat().st_mtime, tz=UTC) > r.modified
         if local_newer and not force:
+            if merge and key.startswith("raw/") and key.endswith(".parquet"):
+                return key, "merge"
             return key, "skip-local-newer"
         return key, "download"
 
@@ -170,14 +177,20 @@ def pull(
         decisions = [d for d in pool.map(_decide, remote) if d]
     skipped = [k for k, a in decisions if a == "skip-local-newer"]
     todo = [k for k, a in decisions if a == "download"]
+    merges = [k for k, a in decisions if a == "merge"]
     for k in skipped:
-        print(f"kept local (newer than bucket, differs): {k}  [pull --force to overwrite]")
-    total = sum(remote[k].size for k in todo)
+        print(f"kept local (newer than bucket, differs): {k}  [pull --merge or --force]")
+    total = sum(remote[k].size for k in todo + merges)
     if dry_run:
         for k in todo:
             print("would pull", k)
-        print(f"pull (dry run): {len(todo)} files, {total / 1e6:.1f} MB, {len(skipped)} kept")
-        return len(todo)
+        for k in merges:
+            print("would merge", k)
+        print(
+            f"pull (dry run): {len(todo)} files, {total / 1e6:.1f} MB, "
+            f"{len(merges)} merged, {len(skipped)} kept"
+        )
+        return len(todo) + len(merges)
 
     def _down(key):
         dest = root / key
@@ -186,10 +199,39 @@ def pull(
         s3.download_file(bucket, key, str(tmp))
         tmp.replace(dest)
 
+    def _merge(key):
+        dest = root / key
+        tmp = dest.with_suffix(dest.suffix + ".remote.tmp")
+        s3.download_file(bucket, key, str(tmp))
+        _merge_partition(dest, tmp)
+        tmp.unlink(missing_ok=True)
+
     with ThreadPoolExecutor(workers) as pool:
         list(pool.map(_down, todo))
-    print(f"pull: {len(todo)} files, {total / 1e6:.1f} MB, {len(skipped)} kept local")
-    return len(todo)
+        list(pool.map(_merge, merges))
+    print(
+        f"pull: {len(todo)} files, {total / 1e6:.1f} MB, {len(merges)} merged, "
+        f"{len(skipped)} kept local"
+    )
+    return len(todo) + len(merges)
+
+
+def _merge_partition(local: Path, remote: Path) -> None:
+    """Union of two copies of one partition on `ts`; local rows win on duplicates."""
+    import pandas as pd
+
+    a = pd.read_parquet(local)
+    b = pd.read_parquet(remote)
+    for df in (a, b):
+        df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    merged = (
+        pd.concat([a, b], ignore_index=True)
+        .drop_duplicates(subset="ts", keep="first")
+        .sort_values("ts")
+    )
+    tmp = local.with_suffix(".parquet.tmp")
+    merged.to_parquet(tmp, index=False)
+    tmp.replace(local)
 
 
 def main() -> None:
@@ -204,9 +246,16 @@ def main() -> None:
         help="push: re-upload all; pull: overwrite newer local files",
     )
     ap.add_argument("--dry-run", action="store_true", help="list what would be copied")
+    ap.add_argument(
+        "--merge",
+        action="store_true",
+        help="pull: merge a conflicting raw partition row by row instead of keeping local",
+    )
     args = ap.parse_args()
-    fn = push if args.action == "push" else pull
-    fn(args.bucket, args.dataset, force=args.force, dry_run=args.dry_run)
+    if args.action == "push":
+        push(args.bucket, args.dataset, force=args.force, dry_run=args.dry_run)
+    else:
+        pull(args.bucket, args.dataset, force=args.force, dry_run=args.dry_run, merge=args.merge)
 
 
 if __name__ == "__main__":

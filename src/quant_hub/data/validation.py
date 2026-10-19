@@ -35,13 +35,21 @@ def check_bars(df: pd.DataFrame) -> list[str]:
     if not df["ts"].is_monotonic_increasing:
         problems.append("timestamps not sorted")
     for col in ("open", "high", "low", "close"):
+        nan = df[col].isna().sum()
+        if nan:
+            problems.append(f"{nan} missing values in {col}")
         bad = (df[col] <= 0).sum()
         if bad:
             problems.append(f"{bad} non-positive values in {col}")
     bad_hl = (df["high"] < df["low"]).sum()
     if bad_hl:
         problems.append(f"{bad_hl} bars with high < low")
-    body_out = ((df["close"] > df["high"]) | (df["close"] < df["low"])).sum()
-    if body_out:
-        problems.append(f"{body_out} bars with close outside [low, high]")
+    for col in ("open", "close"):
+        out = ((df[col] > df["high"]) | (df[col] < df["low"])).sum()
+        if out:
+            problems.append(f"{out} bars with {col} outside [low, high]")
+    if "volume" in df:
+        neg = (df["volume"] < 0).sum()
+        if neg:
+            problems.append(f"{neg} negative volumes")
     return problems

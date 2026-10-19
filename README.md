@@ -20,9 +20,9 @@ src/quant_hub/
     connectors/  hyperliquid (API), hl_archive (S3 L2), binance (Vision dumps), robotwealth (API), scrapingbee
   universe.py    point-in-time universes (market cap, liquidity)
   alpha/         signals, features, momentum, funding signals
-  risk/          volatility, covariance, factor_model, hedging, exposures, leverage, drawdown
+  risk/          volatility, covariance, factor_model, panel_risk_model, tail, hedging, exposures, leverage, drawdown
   portfolio/     construction, sizing, neutral (betas, neutralisation), pit_construction (vol target, MV, HRP)
-  backtest/      metrics, multiple_testing, validation (WF, purged k-fold, CPCV); engines/daily_rebalance
+  backtest/      metrics, multiple_testing, validation (WF, purged k-fold, CPCV), simulation; engines/daily_rebalance
   costs/         slippage (impact models)
   attribution/   factor attribution, performance, panel_attribution (by weight source, TS/CS)
   live/          production execution: contracts, store, OMS, risk, policy, engine, adapters, notifier, cli
@@ -38,7 +38,7 @@ Strategy research that uses this toolkit lives in `void-veritas/yolo-microstruct
 (`yolo/` pipeline, `research/`, `prod/`); the production design and runbook are there
 (`prod/README.md`, `prod/RUNBOOK.md`). The live layer here is strategy-agnostic:
 a *book* passport (`live.contracts.Book`), a weights file per day, and `live.engine.Session`
-that trades it on an adapter (`paper`, `fake` for tests, `hyperliquid`). Run
+that trades it on an adapter (`paper`, `paper_hl` on live HL quotes, `fake` for tests, `hyperliquid`). Run
 `python -m quant_hub.live --help`.
 
 The research toolkit (`risk`, `portfolio`, `alpha`, `attribution`, `costs`,
@@ -112,7 +112,7 @@ inst    = load_instruments(exchange="binance", status="trading")             # i
 
 | Function | Purpose |
 |---|---|
-| `loaders.load_ohlcv(assets, start, end, exchange="binance", field=None)` | 15m bars; `field=` pivots to a ts × asset matrix |
+| `loaders.load_ohlcv(assets, start, end, exchange="binance", field=None, interval="15m")` | 15m bars, or daily with `interval="1d"` (dataset `ohlcv_1d`); `field=` pivots to a ts × asset matrix |
 | `loaders.load_funding(assets, start, end, exchange="hyperliquid")` | funding events at each venue's native cadence |
 | `loaders.load_oi(assets, start, end)` | Binance 5-min open-interest snapshots |
 | `instruments.load_instruments(exchange=None, status=None)` | the instruments table as a DataFrame |
@@ -160,7 +160,8 @@ limits to one dataset. Safe daily order: `pull` → backfill → `health` → `p
 ### Health check (`data/health.py`)
 
 ```
-uv run python -m quant_hub.data.health [--dataset ohlcv_1d] [--exchange binance] [--assets BTC,ETH] [--all]
+uv run python -m quant_hub.data.health [--dataset ohlcv_1d] [--exchange binance] [--assets BTC,ETH] [--stale-days 3] [--all] [--cross-venue]
+# --all prints every row, not only flagged ones; --cross-venue compares HL and Binance daily closes per asset
 ```
 
 One table per (dataset, exchange, asset): first/last bar, rows, pre-listing
@@ -317,6 +318,6 @@ performance.selection_sizing_timing(weights_ts, idio_returns_ts)   # skill decom
 
 ## Tooling
 
-- `uv run pytest` — tests (`test_data_layer.py`, `test_toolkit.py`)
+- `uv run pytest` — tests (`test_data_layer.py`, `test_validation.py`, `test_toolkit.py`, `test_backtest_daily.py`, `test_pit_portfolio.py`, `test_panel_risk_model.py`, `test_tail.py`, `test_simulation_stats.py`, `test_live.py`)
 - `uv run ruff check .` — lint (PEP 8 + numpy-style docstrings)
 - `uv run black .` — format (line length 100)

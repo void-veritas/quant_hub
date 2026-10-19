@@ -57,3 +57,24 @@ def test_regime_table_splits_by_lagged_trailing_benchmark():
     t = regime_table(strat, bench, window=10)
     assert set(t.index) == {"bull", "bear"}
     assert t.loc["bull", "benchmark_ann_%"] > 0 > t.loc["bear", "benchmark_ann_%"]
+
+
+def test_check_bars_flags_nans_open_range_and_negative_volume():
+    import pandas as pd
+
+    from quant_hub.data import validation
+
+    df = pd.DataFrame(
+        {
+            "ts": pd.date_range("2024-01-01", periods=3, freq="D", tz="UTC"),
+            "open": [1.0, 5.0, 1.0],
+            "high": [2.0, 2.0, 2.0],
+            "low": [0.5, 0.5, 0.5],
+            "close": [1.5, 1.5, float("nan")],
+            "volume": [1.0, -1.0, 1.0],
+        }
+    )
+    p = validation.check_bars(df)
+    assert any("missing values in close" in x for x in p)
+    assert any("open outside" in x for x in p)
+    assert any("negative volumes" in x for x in p)

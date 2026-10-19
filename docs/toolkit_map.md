@@ -24,7 +24,7 @@ explanation, realised-PnL attribution, and dynamic exposure, see
 
 | Module | Contents | Source |
 |---|---|---|
-| `alpha/signals.py` | z-score, rank, winsorize, IC, `ic_to_sharpe`/`ic_to_ir` (fundamental law), orthogonalize-against-factors, combine signals | EQI Ch9, APM Ch6/8 |
+| `alpha/signals.py` | z-score, rank, winsorize, IC, `ic_to_sharpe`/`ic_to_information_ratio` (fundamental law), orthogonalize-against-factors, combine signals | EQI Ch9, APM Ch6/8 |
 | `portfolio/construction.py` | MVO (`w*=(σ/√αᵀΩ⁻¹α)Ω⁻¹α`), vol/correlation form `v*∝C⁻¹s`, min-variance, robust MVO (cov inflation), factor-neutral proportional weights | EQI Ch9–10, APM Ch11 |
 | `portfolio/sizing.py` | proportional / risk-parity / MV / shrunk-MV sizing, vol targeting, Kelly (`μ/(μ²+σ²)`, binary, fractional, growth rate, uncertainty-adjusted) | EQI Ch13, APM Ch6 |
 
@@ -75,6 +75,6 @@ borrow-rate factors — implement if a strategy needs them.
 | `risk/tail.py` | VaR/CVaR on scenarios (Rockafellar–Uryasev), Euler CVaR contributions, Entropy Pooling views (mean, second moment, probability) and stress tables via `fortitudo.tech` | PCRM Ch 5–7 |
 | `backtest/metrics.py` (additions) | moment ratios (skew, kurtosis), Mertens standard error, PSR, DSR, circular block-bootstrap Sharpe CI | Mertens 2002; Bailey & López de Prado |
 | `backtest/simulation.py` | block-bootstrap and state-conditioned resampled paths, path statistics, effective history | PCRM Ch 3 (time- and state-dependent resampling, simplified) |
-| `portfolio/pit_construction.py` (additions) | EWMA covariance option, Euler variance-share cap, market-vol regime multiplier of the target vol | Steiner essays 4, 6; PCRM 6.3 |
+| `portfolio/pit_construction.py` (additions) | EWMA covariance option, Euler variance-share cap, market-vol state and regime multiplier of the target vol (`market_vol_state`, `regime_scale`), two-state HMM alternative (`hmm_regime_multipliers`, tested and rejected, note 024); the `mp` covariance option is `risk.covariance.denoise_covariance` (rejected for the YOLO book, note 024) | Steiner essays 4, 6; PCRM 6.3 |
 | `portfolio/neutral.py` (addition) | `project_out`: zero the portfolio's loadings on chosen style exposures | EQI Ch 10 (factor-neutral) |
 | `data/health.py`, `data/sync.py` | data-layer health report; content-based S3 mirror with local-change protection | — |

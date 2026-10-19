@@ -187,6 +187,25 @@ def hmm_regime_multipliers(
     return mult
 
 
+def market_vol_state(
+    panel: pd.DataFrame, window: int = 30, lookback: int = 365, quantile: float = 0.8
+) -> pd.DataFrame:
+    """Market-volatility state per date: columns `state`, `threshold`.
+
+    `state` = annualised EWMA (`window` half-life) vol of the equal-weighted total
+    return (price + funding) of every asset in the panel with a return that day, lagged
+    one day. `threshold` = its trailing `lookback`-day `quantile`, lagged one day
+    (point in time). The panel, not the universe, defines the market on purpose: the
+    state must not change when the universe rule does. Production reports exactly this
+    frame, so the published state and the applied multiplier always agree.
+    """
+    r = _returns_wide(panel)
+    mkt = r.mean(axis=1, skipna=True)
+    state = (mkt.ewm(halflife=window, min_periods=window).std() * np.sqrt(365)).shift(1)
+    thr = state.rolling(lookback, min_periods=lookback // 2).quantile(quantile).shift(1)
+    return pd.DataFrame({"state": state, "threshold": thr})
+
+
 def regime_scale(
     panel: pd.DataFrame,
     window: int = 30,
@@ -194,19 +213,14 @@ def regime_scale(
     quantile: float = 0.8,
     scale: float = 0.5,
 ) -> pd.Series:
-    """Per-date multiplier of the target vol from the market-volatility state.
+    """Per-date multiplier of the target vol.
 
-    State = annualised EWMA (`window` half-life) vol of the equal-weighted return of
-    the day's universe. When the state exceeds its trailing `lookback`-day quantile
-    (point in time), the multiplier is `scale`, else 1. Both the state and its
-    quantile use data strictly before the date.
+    `scale` while the market-vol state (`market_vol_state`) exceeds its trailing
+    quantile, else 1.
     """
-    r = _returns_wide(panel)
-    mkt = r.mean(axis=1, skipna=True)
-    state = (mkt.ewm(halflife=window, min_periods=window).std() * np.sqrt(365)).shift(1)
-    thr = state.rolling(lookback, min_periods=lookback // 2).quantile(quantile).shift(1)
-    mult = pd.Series(1.0, index=state.index)
-    mult[(state > thr) & thr.notna()] = scale
+    s = market_vol_state(panel, window, lookback, quantile)
+    mult = pd.Series(1.0, index=s.index)
+    mult[(s["state"] > s["threshold"]) & s["threshold"].notna()] = scale
     return mult
 
 
