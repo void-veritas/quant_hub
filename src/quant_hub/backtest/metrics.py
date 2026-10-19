@@ -315,3 +315,94 @@ def mse_variance(realized_var, forecast_var) -> float:
         The mean squared error (lower is better).
     """
     return float(np.mean((np.asarray(realized_var, float) - np.asarray(forecast_var, float)) ** 2))
+
+
+# ------------------------------------------------------------- non-normal Sharpe inference
+def return_moments(returns) -> dict:
+    """Skewness and kurtosis as moment ratios (Bouchaud): ``m3/σ³`` and ``m4/σ⁴``.
+
+    Returns a dict with ``skew``, ``kurtosis`` (non-excess; 3 for a normal),
+    ``excess_kurtosis`` and ``n``.
+    """
+    x = np.asarray(returns, float)
+    x = x[np.isfinite(x)]
+    m = x - x.mean()
+    s = np.sqrt((m**2).mean())
+    return {
+        "skew": float((m**3).mean() / s**3),
+        "kurtosis": float((m**4).mean() / s**4),
+        "excess_kurtosis": float((m**4).mean() / s**4 - 3.0),
+        "n": int(len(x)),
+    }
+
+
+def sharpe_standard_error_mertens(returns, periods_per_year: float | None = None) -> float:
+    """Standard error of the per-period Sharpe allowing for skew and kurtosis (Mertens 2002).
+
+    ``Var(SR) = (1 + SR²/2 − γ₃·SR + (γ₄−3)/4·SR²) / T``; with ``periods_per_year``
+    the result is annualised by ``√periods``. Lo's iid-normal formula is the special
+    case γ₃ = 0, γ₄ = 3.
+    """
+    x = np.asarray(returns, float)
+    x = x[np.isfinite(x)]
+    sr = x.mean() / x.std(ddof=1)
+    mo = return_moments(x)
+    var = (1 + 0.5 * sr**2 - mo["skew"] * sr + (mo["kurtosis"] - 3) / 4 * sr**2) / len(x)
+    se = float(np.sqrt(max(var, 0.0)))
+    return se * np.sqrt(periods_per_year) if periods_per_year else se
+
+
+def probabilistic_sharpe_ratio(returns, benchmark_sharpe: float = 0.0) -> float:
+    """PSR (Bailey & López de Prado): ``P[true SR > benchmark]`` given the sample SR.
+
+    ``benchmark_sharpe`` is per period (not annualised). Uses the Mertens standard
+    error, so fat tails and negative skew lower the PSR.
+    """
+    x = np.asarray(returns, float)
+    x = x[np.isfinite(x)]
+    sr = x.mean() / x.std(ddof=1)
+    se = sharpe_standard_error_mertens(x)
+    return float(stats.norm.cdf((sr - benchmark_sharpe) / se))
+
+
+def deflated_sharpe_ratio(returns, n_trials: int, trial_sharpe_variance: float) -> dict:
+    """DSR: PSR against the Sharpe expected from the best of ``n_trials`` null strategies.
+
+    ``trial_sharpe_variance`` is the variance of the per-period Sharpe ratios across
+    the trials that were run (how dispersed the search was). The benchmark is
+    ``√V · ((1−γ)Φ⁻¹(1−1/N) + γΦ⁻¹(1−1/(N·e)))`` with Euler's γ (Bailey & López de
+    Prado 2014). Returns ``{"sr0": benchmark per period, "dsr": probability}``.
+    """
+    if n_trials < 2:
+        return {"sr0": 0.0, "dsr": probabilistic_sharpe_ratio(returns, 0.0)}
+    gamma = 0.5772156649
+    z = stats.norm.ppf
+    sr0 = np.sqrt(trial_sharpe_variance) * (
+        (1 - gamma) * z(1 - 1 / n_trials) + gamma * z(1 - 1 / (n_trials * np.e))
+    )
+    return {"sr0": float(sr0), "dsr": probabilistic_sharpe_ratio(returns, float(sr0))}
+
+
+def block_bootstrap_sharpe_ci(
+    returns,
+    block: int = 20,
+    n_boot: int = 2000,
+    confidence: float = 0.95,
+    periods_per_year: float = 365.0,
+    seed: int = 0,
+) -> tuple[float, float]:
+    """Percentile CI of the annualised Sharpe from a circular block bootstrap.
+
+    Blocks of ``block`` consecutive observations preserve autocorrelation and
+    volatility clustering that the iid formulas ignore.
+    """
+    x = np.asarray(returns, float)
+    x = x[np.isfinite(x)]
+    n = len(x)
+    rng = np.random.default_rng(seed)
+    starts = rng.integers(0, n, size=(n_boot, n // block + 1))
+    idx = (starts[:, :, None] + np.arange(block)[None, None, :]).reshape(n_boot, -1)[:, :n] % n
+    samples = x[idx]
+    sr = samples.mean(axis=1) / samples.std(axis=1, ddof=1) * np.sqrt(periods_per_year)
+    lo, hi = np.percentile(sr, [50 * (1 - confidence), 50 * (1 + confidence)])
+    return float(lo), float(hi)
