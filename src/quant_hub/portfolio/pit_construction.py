@@ -88,53 +88,101 @@ def cap_risk_share(w: np.ndarray, cov: np.ndarray, max_share: float, iters: int 
     return w
 
 
+def _hmm2_fit(x: np.ndarray, iters: int = 100, tol: float = 1e-6) -> dict:
+    """Two-state Gaussian HMM (shared variance) by Baum-Welch with a sticky initialisation."""
+    lo, hi = np.quantile(x, [0.25, 0.75])
+    mu = np.array([lo, hi])
+    sig = max(np.std(x) / 2, 1e-6)
+    a = np.array([[0.95, 0.05], [0.05, 0.95]])
+    pi = np.array([0.5, 0.5])
+    ll_old = -np.inf
+    for _ in range(iters):
+        alpha, c = _hmm2_forward(x, mu, sig, a, pi)
+        beta = _hmm2_backward(x, mu, sig, a, c)
+        gamma = alpha * beta
+        gamma /= gamma.sum(axis=1, keepdims=True)
+        b = _hmm2_emission(x, mu, sig)
+        xi = alpha[:-1, :, None] * a[None, :, :] * (b[1:, None, :] * beta[1:, None, :])
+        xi /= xi.sum(axis=(1, 2), keepdims=True)
+        a = xi.sum(axis=0) / gamma[:-1].sum(axis=0)[:, None]
+        pi = gamma[0]
+        mu = (gamma * x[:, None]).sum(axis=0) / gamma.sum(axis=0)
+        sig = np.sqrt((gamma * (x[:, None] - mu) ** 2).sum() / len(x))
+        ll = np.log(c).sum()
+        if abs(ll - ll_old) < tol:
+            break
+        ll_old = ll
+    return {"mu": mu, "sig": sig, "a": a, "pi": pi}
+
+
+def _hmm2_emission(x, mu, sig):
+    z = (x[:, None] - mu[None, :]) / sig
+    return np.exp(-0.5 * z**2) / (sig * np.sqrt(2 * np.pi))
+
+
+def _hmm2_forward(x, mu, sig, a, pi):
+    b = _hmm2_emission(x, mu, sig)
+    alpha = np.zeros((len(x), 2))
+    c = np.zeros(len(x))
+    alpha[0] = pi * b[0]
+    c[0] = alpha[0].sum()
+    alpha[0] /= c[0]
+    for t in range(1, len(x)):
+        alpha[t] = (alpha[t - 1] @ a) * b[t]
+        c[t] = alpha[t].sum()
+        alpha[t] /= c[t]
+    return alpha, c
+
+
+def _hmm2_backward(x, mu, sig, a, c):
+    b = _hmm2_emission(x, mu, sig)
+    beta = np.ones((len(x), 2))
+    for t in range(len(x) - 2, -1, -1):
+        beta[t] = (a @ (b[t + 1] * beta[t + 1])) / c[t + 1]
+    return beta
+
+
 def hmm_regime_multipliers(
     panel: pd.DataFrame,
     refit_every: int = 21,
     min_history: int = 250,
     threshold: float = 0.5,
     scale: float = 0.5,
-    min_variance_ratio: float = 2.0,
+    vol_window: int = 10,
+    min_vol_ratio: float = 1.5,
+    min_persistence: float = 0.8,
 ) -> pd.Series:
-    """Per-date multiplier from a two-state Markov-switching variance model (EQI Ch 2 / HMM).
+    """Per-date multiplier from a two-state hidden Markov model of realised volatility.
 
-    The model (statsmodels ``MarkovRegression``, switching variance) is refitted every
-    ``refit_every`` days on the equal-weighted universe return strictly before the
-    date; between refits the filtered probability of the high-variance state is
-    updated with the fixed parameters. Multiplier ``scale`` when that probability
-    exceeds ``threshold``, else 1. When the two fitted variances differ by less than
-    ``min_variance_ratio`` the states are not identified (typically before the first
-    high-vol episode in the history) and the multiplier stays 1. Point in time by
-    construction.
+    Observable: log of the ``vol_window``-day rolling volatility of the equal-weighted
+    universe return (persistent, so two levels are identifiable; a switching-variance
+    model on raw returns splits iid noise into spurious states). A two-state Gaussian
+    HMM is refitted by Baum-Welch every ``refit_every`` days on data strictly before
+    the date; between refits the *filtered* probability of the high-vol state is
+    updated with the fixed parameters (forward pass only, no smoothing). Multiplier
+    ``scale`` when that probability, lagged one day, exceeds ``threshold``, else 1.
+    The states count as identified only when the high state's volatility level is at
+    least ``min_vol_ratio`` times the low one and both states are sticky
+    (``a_ii >= min_persistence``); otherwise (typically before the first high-vol
+    episode in the history, when EM splits noise) the multiplier stays 1. Point in
+    time by construction.
     """
-    from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
-
     r = _returns_wide(panel)
-    mkt = r.mean(axis=1, skipna=True).dropna()
-    x = mkt.to_numpy()
+    mkt = r.mean(axis=1, skipna=True)
+    obs = np.log(mkt.rolling(vol_window).std()).dropna()
+    x = obs.to_numpy()
     mult = pd.Series(1.0, index=mkt.index)
-    params = None
     for i in range(min_history, len(x), refit_every):
-        try:
-            fit = MarkovRegression(x[:i], k_regimes=2, switching_variance=True).fit(
-                disp=False, maxiter=200
-            )
-            params = fit.params
-        except Exception:  # noqa: BLE001 - keep the previous parameters on a failed refit
-            if params is None:
-                continue
+        prm = _hmm2_fit(x[:i])
         end = min(i + refit_every, len(x))
-        # filter the history through end-1 with the parameters known at i; each day's
-        # filtered probability uses returns up to and including that day (known next morning)
-        model = MarkovRegression(x[:end], k_regimes=2, switching_variance=True)
-        probs = model.filter(params).filtered_marginal_probabilities
-        variances = np.asarray(params[-2:], float)
-        high = int(np.argmax(variances))  # the state with the larger variance
-        sel = mkt.index[i:end]
-        if variances.max() < min_variance_ratio * variances.min():
-            mult.loc[sel] = 1.0  # states not separated (no high-vol episode seen yet): do nothing
+        sel = obs.index[i:end]
+        high = int(np.argmax(prm["mu"]))
+        separated = abs(prm["mu"][1] - prm["mu"][0]) >= np.log(min_vol_ratio)
+        sticky = np.diag(prm["a"]).min() >= min_persistence
+        if not (separated and sticky):
             continue
-        p_high = pd.Series(probs[:, high], index=mkt.index[:end]).shift(1)  # known at the decision
+        alpha, _ = _hmm2_forward(x[:end], prm["mu"], prm["sig"], prm["a"], prm["pi"])
+        p_high = pd.Series(alpha[:, high], index=obs.index[:end]).shift(1)  # known at the decision
         mult.loc[sel] = np.where(p_high.loc[sel] > threshold, scale, 1.0)
     return mult
 

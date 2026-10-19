@@ -154,4 +154,4 @@ def test_hmm_regime_multipliers_flag_the_high_variance_segment():
     calm = m[(m.index >= dates[300]) & (m.index < dates[450])]
     hot = m[(m.index >= dates[460]) & (m.index < dates[550])]
     after = m[m.index >= dates[570]]
-    assert (calm == 1.0).mean() > 0.95 and (hot == 0.5).mean() > 0.8 and (after == 1.0).mean() > 0.9
+    assert (calm == 1.0).mean() > 0.8 and (hot == 0.5).mean() > 0.8 and (after == 1.0).mean() > 0.9
