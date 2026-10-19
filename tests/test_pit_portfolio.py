@@ -81,3 +81,53 @@ def test_cap_universe_uses_yesterdays_rank():
         .set_index("asset")["in_universe"]
         .equals(out[out["date"] == last].set_index("asset")["in_universe"])
     )
+
+
+def test_ewma_covariance_reacts_faster_and_risk_share_cap_binds():
+    import numpy as np
+    import pandas as pd
+
+    from quant_hub.portfolio.pit_construction import cap_risk_share, pit_covariance
+
+    rng = np.random.default_rng(0)
+    dates = pd.date_range("2024-01-01", periods=200, freq="D")
+    vol = np.where(np.arange(200) < 170, 0.01, 0.05)  # regime switch 30 days before the end
+    ret = pd.DataFrame(rng.normal(0, vol[:, None], (200, 5)), index=dates, columns=list("ABCDE"))
+    d = dates[-1] + pd.Timedelta(days=1)
+    lw = pit_covariance(ret, d, 120, "lw")
+    ew = pit_covariance(ret, d, 120, "ewma", halflife=15)
+    assert np.sqrt(np.diag(ew)).mean() > 1.4 * np.sqrt(np.diag(lw)).mean()
+    cov = np.diag([0.04, 0.01, 0.01, 0.01, 0.01])
+    w = np.array([0.5, 0.125, 0.125, 0.125, 0.125])
+    capped = cap_risk_share(w, cov, 0.3)
+    share = capped * (cov @ capped) / (capped @ cov @ capped)
+    assert share.max() <= 0.3 + 1e-6 and np.sign(capped).tolist() == np.sign(w).tolist()
+
+
+def test_project_out_zeroes_style_loadings():
+    import numpy as np
+    import pandas as pd
+
+    from quant_hub.portfolio.neutral import project_out
+
+    rng = np.random.default_rng(1)
+    rows = []
+    for d in pd.date_range("2024-01-01", periods=3, freq="D"):
+        for a in range(20):
+            rows.append(
+                dict(
+                    date=d,
+                    asset=f"A{a}",
+                    size=rng.normal(),
+                    vol=rng.normal(),
+                    w=rng.normal(0, 0.05),
+                )
+            )
+    df = pd.DataFrame(rows)
+    out = project_out(
+        df["w"], df["date"], df["asset"], df[["date", "asset", "size", "vol"]], ("size", "vol")
+    )
+    df["w2"] = out
+    for _, g in df.groupby("date"):
+        assert abs((g["w2"] * g["size"]).sum()) < 1e-9 and abs((g["w2"] * g["vol"]).sum()) < 1e-9
+    assert out.abs().max() <= 0.25 + 1e-12

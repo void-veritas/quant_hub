@@ -6,6 +6,7 @@ Moved from yolo-microstructure (note 014). Panels are long frames with columns
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
@@ -84,3 +85,40 @@ def neutralise(
     gross = w.abs().groupby(dates).transform("sum")
     w = w.where(gross <= 1, w / gross)
     return w.rename("scaled_weight")
+
+
+def project_out(
+    weight: pd.Series,
+    dates: pd.Series,
+    assets: pd.Series,
+    exposures: pd.DataFrame,
+    styles: tuple[str, ...],
+    cap: float = 0.25,
+) -> pd.Series:
+    """Remove the portfolio's loadings on `styles`: ``w ← w − B (B'B)⁻¹ B' w`` per date.
+
+    `exposures` is the long frame of :func:`quant_hub.risk.panel_risk_model.build_exposures`
+    (date, asset, style columns standardised within the day). The projection is the
+    minimum-norm change of the weights that zeroes the chosen loadings; names without
+    exposures keep their weight. The per-name cap is re-applied and the gross
+    renormalised to ≤ 1, as in the production clamp. NaN weights stay NaN.
+    """
+    df = pd.DataFrame(
+        {"w": weight.to_numpy(), "date": dates.to_numpy(), "asset": assets.to_numpy()}
+    )
+    df = df.merge(exposures[["date", "asset", *styles]], on=["date", "asset"], how="left")
+    df.index = weight.index
+    out = weight.copy()
+    held = out.notna() & (out != 0) & df[list(styles)].notna().all(axis=1)
+    sub = df[held]
+    for _d, idx in sub.groupby("date").indices.items():
+        rows = sub.iloc[idx]
+        b = rows[list(styles)].to_numpy(float)
+        w = rows["w"].to_numpy(float)
+        gram = b.T @ b
+        if np.linalg.matrix_rank(gram) < gram.shape[0]:
+            continue
+        out.loc[rows.index] = w - b @ np.linalg.solve(gram, b.T @ w)
+    out = out.clip(-cap, cap)
+    gross = out.where(held).abs().groupby(dates).transform("sum")
+    return out.where(~(held & (gross > 1)), out / gross)

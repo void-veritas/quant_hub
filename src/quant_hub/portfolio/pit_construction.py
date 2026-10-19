@@ -33,21 +33,82 @@ def _returns_wide(panel: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def pit_covariance(ret: pd.DataFrame, date, window: int, method: str) -> pd.DataFrame | None:
-    """Covariance from the `window` rows strictly before `date`; None if too short."""
+def pit_covariance(
+    ret: pd.DataFrame, date, window: int, method: str, halflife: float | None = None
+) -> pd.DataFrame | None:
+    """Covariance from the `window` rows strictly before `date`; None if too short.
+
+    Methods: "lw" Ledoit-Wolf, "mp" Marchenko-Pastur denoised, "sample", "ewma"
+    (exponentially weighted with `halflife` days, shrunk towards its own diagonal with
+    the Ledoit-Wolf intensity of the equal-weighted sample: reacts to a volatility
+    regime within ~2 half-lives instead of `window` days).
+    """
     hist = ret.loc[ret.index < date].tail(window)
     hist = hist.dropna(axis=1, thresh=int(0.8 * window)).fillna(0.0)
     if len(hist) < max(40, window // 2) or hist.shape[1] < 3:
         return None
+    x = hist.to_numpy()
     if method == "lw":
-        cov, _ = ledoit_wolf_shrinkage(hist.to_numpy())
+        cov, _ = ledoit_wolf_shrinkage(x)
     elif method == "mp":
-        cov = denoise_covariance(hist.to_numpy())
+        cov = denoise_covariance(x)
     elif method == "sample":
-        cov = np.cov(hist.to_numpy(), rowvar=False)
+        cov = np.cov(x, rowvar=False)
+    elif method == "ewma":
+        hl = halflife or window / 4
+        lam = 0.5 ** (1.0 / hl)
+        wts = lam ** np.arange(len(x) - 1, -1, -1)
+        wts = wts / wts.sum()
+        xc = x - wts @ x
+        cov = (xc * wts[:, None]).T @ xc
+        _, delta = ledoit_wolf_shrinkage(x)
+        cov = (1 - delta) * cov + delta * np.diag(np.diag(cov))
     else:
         raise ValueError(method)
     return pd.DataFrame(cov, index=hist.columns, columns=hist.columns)
+
+
+def cap_risk_share(w: np.ndarray, cov: np.ndarray, max_share: float, iters: int = 20) -> np.ndarray:
+    """Shrink names whose Euler variance contribution exceeds `max_share` of the total.
+
+    Contribution_i = w_i (Σw)_i / (w'Σw). Offenders are scaled down towards the cap,
+    the rest is left alone; repeated until no name exceeds the cap (risk budgeting as
+    a constraint, variance version of PCRM 6.3). Signs are preserved.
+    """
+    w = w.astype(float).copy()
+    for _ in range(iters):
+        tot = float(w @ cov @ w)
+        if tot <= 0:
+            return w
+        share = w * (cov @ w) / tot
+        over = share > max_share * (1 + 1e-9)
+        if not over.any():
+            return w
+        w[over] *= np.sqrt(max_share / share[over])
+    return w
+
+
+def regime_scale(
+    panel: pd.DataFrame,
+    window: int = 30,
+    lookback: int = 365,
+    quantile: float = 0.8,
+    scale: float = 0.5,
+) -> pd.Series:
+    """Per-date multiplier of the target vol from the market-volatility state.
+
+    State = annualised EWMA (`window` half-life) vol of the equal-weighted return of
+    the day's universe. When the state exceeds its trailing `lookback`-day quantile
+    (point in time), the multiplier is `scale`, else 1. Both the state and its
+    quantile use data strictly before the date.
+    """
+    r = _returns_wide(panel)
+    mkt = r.mean(axis=1, skipna=True)
+    state = (mkt.ewm(halflife=window, min_periods=window).std() * np.sqrt(365)).shift(1)
+    thr = state.rolling(lookback, min_periods=lookback // 2).quantile(quantile).shift(1)
+    mult = pd.Series(1.0, index=state.index)
+    mult[(state > thr) & thr.notna()] = scale
+    return mult
 
 
 def _cap_and_normalise(w: pd.Series, cap: float) -> pd.Series:
@@ -98,9 +159,18 @@ def build(
     target_vol: float = 0.12,
     max_gross: float = 1.5,
     cap: float = 0.25,
+    cov_halflife: float | None = None,
+    max_risk_share: float | None = None,
+    regime: dict | None = None,
 ) -> pd.Series:
-    """Return a scaled_weight series for `method` in {"vol_target", "mv", "hrp"}."""
+    """Return a scaled_weight series for `method` in {"vol_target", "mv", "hrp"}.
+
+    Optional overlays (vol_target only): `max_risk_share` caps each name's Euler
+    variance contribution before the vol scaling; `regime` (kwargs of
+    :func:`regime_scale`) multiplies the target vol by the state multiplier.
+    """
     ret = _returns_wide(panel)
+    mult = regime_scale(panel, **regime) if regime else None
     out = pd.Series(np.nan, index=panel.index, name="scaled_weight")
     for date, idx in panel.groupby("date").indices.items():
         rows = panel.iloc[idx]
@@ -108,7 +178,7 @@ def build(
         if held.sum() < 3:
             continue
         assets = rows["asset"].to_numpy()[held]
-        cov = pit_covariance(ret, date, window, cov_method)
+        cov = pit_covariance(ret, date, window, cov_method, cov_halflife)
         if cov is None:
             continue
         common = [a for a in assets if a in cov.index]
@@ -119,10 +189,13 @@ def build(
         if method == "vol_target":
             w = base_weight.loc[[pos[a] for a in common]].to_numpy()
             w = np.nan_to_num(w)
+            if max_risk_share is not None:
+                w = cap_risk_share(w, cov.to_numpy(), max_risk_share)
             cur = np.sqrt(w @ cov.to_numpy() @ w * 365)
             if cur <= 0:
                 continue
-            scale = min(target_vol / cur, max_gross / max(np.abs(w).sum(), 1e-9))
+            tv = target_vol * (float(mult.get(date, 1.0)) if mult is not None else 1.0)
+            scale = min(tv / cur, max_gross / max(np.abs(w).sum(), 1e-9))
             new = pd.Series(w * scale, index=common)
         elif method == "mv":
             mu = rows.set_index("asset").loc[common, "weight"].to_numpy()
