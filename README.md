@@ -151,8 +151,31 @@ uv run python -m quant_hub.data.sync pull --bucket yolo-research-ep   # fresh co
 uv run python -m quant_hub.data.sync push --bucket yolo-research-ep   # after every backfill
 ```
 
-`push`/`pull` copy only files missing or differing in size; `--dataset` limits to
-one dataset. Same AWS keys as the HL archive.
+Files are compared by content (SHA-256 stored in object metadata), so a revised bar
+of the same file size is still copied. `pull` never overwrites a local file that
+differs and is newer than the bucket copy (it lists it instead); `pull --force`
+does, `push --force` re-uploads everything, `--dry-run` only lists. `--dataset`
+limits to one dataset. Safe daily order: `pull` → backfill → `health` → `push`.
+
+### Health check (`data/health.py`)
+
+```
+uv run python -m quant_hub.data.health [--dataset ohlcv_1d] [--exchange binance] [--assets BTC,ETH] [--all]
+```
+
+One table per (dataset, exchange, asset): first/last bar, rows, pre-listing
+synthetic rows (HL daily), duplicate or unsorted timestamps, OHLCV sanity
+(`validation.check_bars`), gaps against the bar schedule (event data such as
+funding uses the local cadence, so the 8h→1h switch on HL is not a gap), and
+staleness of the last bar. Exit code 1 when anything is flagged; delisted
+instruments are not flagged for staleness.
+
+### Writing rules
+
+`storage.write_partition` merges on `ts` (newest row wins), writes atomically and
+holds a file lock per partition, so two backfills of the same asset cannot lose
+each other's rows. Hyperliquid candle pulls never store the bar that is still
+forming and re-fetch the last `--refresh N` bars (default 2) on every run.
 
 ## Research toolkit
 

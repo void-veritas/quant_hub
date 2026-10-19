@@ -44,7 +44,7 @@ def _utc(day: date) -> datetime:
 
 
 def _existing_ts(dataset: str, exchange: str, asset: str) -> pd.DatetimeIndex:
-    parts = storage.list_partitions(dataset)
+    parts = storage.list_partitions(dataset, root=storage.RAW_ROOT)
     if parts.empty:
         return pd.DatetimeIndex([], tz="UTC")
     parts = parts[(parts["exchange"] == exchange) & (parts["asset"] == asset)]
@@ -169,22 +169,33 @@ def _fill_binance_day_gaps(asset: str, symbol: str, start: date, end: date) -> i
     return n
 
 
-def _ohlcv_hyperliquid(inst: pd.DataFrame, start: date, end: date, interval: str = "15m") -> None:
+def _ohlcv_hyperliquid(
+    inst: pd.DataFrame, start: date, end: date, interval: str = "15m", refresh: int = 2
+) -> None:
     """Backfill bars from the HL API.
 
     Intraday intervals serve only the most recent ~5000 bars; "1d" serves the full
     history (with synthetic zero-volume bars before real trading began), which is
     what point-in-time universe selection by dollar volume needs.
+
+    The API also returns the bar that is still forming. It is never stored: a bar
+    is kept only when its whole interval lies in the past. The last `refresh`
+    stored bars are re-fetched and overwritten on every run, so a bar that was
+    revised at the venue is picked up on the next pull.
     """
     dataset = "ohlcv_1d" if interval == "1d" else "ohlcv_15m"
     step = pd.Timedelta(days=1) if interval == "1d" else pd.Timedelta("15min")
+    closed_before = pd.Timestamp.now(tz="UTC").floor(step)  # bars stamped here or later are open
     for _, row in inst.iterrows():
         asset, symbol = row["canonical_id"], row["symbol"]
         have = _existing_ts(dataset, "hyperliquid", asset)
-        fetch_from = max(_utc(start), have.max() + step) if have.size else _utc(start)
+        fetch_from = _utc(start)
+        if have.size:
+            fetch_from = max(fetch_from, (have.max() - refresh * step).to_pydatetime())
         df = hl.fetch_candles(symbol, interval, fetch_from, _utc(end + timedelta(days=1)))
+        df = df[df["ts"] < closed_before]
         if not df.empty:
-            storage.write_partition(df, dataset, "hyperliquid", asset)
+            storage.write_partition(df, dataset, "hyperliquid", asset, root=storage.RAW_ROOT)
         print(f"ohlcv({interval}) hyperliquid {asset:12s} +{len(df)} rows", flush=True)
         time.sleep(1.1)  # candleSnapshot weighs 20 of the 1200/min budget
 
@@ -202,7 +213,7 @@ def cmd_ohlcv(args) -> None:
     else:
         if args.interval == "1d":
             start = date.fromisoformat(args.start) if args.start else date(2020, 1, 1)
-        _ohlcv_hyperliquid(inst, start, end, interval=args.interval)
+        _ohlcv_hyperliquid(inst, start, end, interval=args.interval, refresh=args.refresh)
 
 
 def cmd_funding(args) -> None:
@@ -378,6 +389,12 @@ def main() -> None:
     ohlcv = sub.add_parser("ohlcv", help="backfill bars (15m; 1d on both venues)")
     _add_common(ohlcv, ["binance", "hyperliquid"])
     ohlcv.add_argument("--interval", choices=["15m", "1d"], default="15m")
+    ohlcv.add_argument(
+        "--refresh",
+        type=int,
+        default=2,
+        help="hyperliquid: re-fetch and overwrite the last N stored bars (default 2)",
+    )
     funding = sub.add_parser("funding", help="backfill funding")
     _add_common(funding, ["binance", "hyperliquid"])
     funding.add_argument(

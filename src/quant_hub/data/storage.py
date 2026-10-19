@@ -13,6 +13,8 @@ Conventions:
 
 from __future__ import annotations
 
+import fcntl
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -38,6 +40,19 @@ def dataset_glob(dataset: str, root: Path = RAW_ROOT) -> str:
     return str(root / dataset / "**" / "data.parquet")
 
 
+@contextmanager
+def _locked(path: Path):
+    """Exclusive advisory lock on `<path>.lock`: two writers of one partition serialise."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_suffix(".lock")
+    with open(lock, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def write_partition(
     df: pd.DataFrame,
     dataset: str,
@@ -60,15 +75,15 @@ def write_partition(
     written = 0
     for year, chunk in df.groupby(ts.dt.year):
         path = partition_path(dataset, exchange, asset, int(year), root)
-        if path.exists():
-            existing = pd.read_parquet(path)
-            existing["ts"] = pd.to_datetime(existing["ts"], utc=True)
-            chunk = pd.concat([existing, chunk], ignore_index=True)
-            chunk = chunk.drop_duplicates(subset="ts", keep="last").sort_values("ts")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".parquet.tmp")
-        chunk.to_parquet(tmp, index=False)
-        tmp.replace(path)  # atomic swap: readers never see a half-written file
+        with _locked(path):  # read-merge-write must not interleave with another writer
+            if path.exists():
+                existing = pd.read_parquet(path)
+                existing["ts"] = pd.to_datetime(existing["ts"], utc=True)
+                chunk = pd.concat([existing, chunk], ignore_index=True)
+                chunk = chunk.drop_duplicates(subset="ts", keep="last").sort_values("ts")
+            tmp = path.with_suffix(".parquet.tmp")
+            chunk.to_parquet(tmp, index=False)
+            tmp.replace(path)  # atomic swap: readers never see a half-written file
         written += len(chunk)
     return written
 
