@@ -104,6 +104,8 @@ def build_exposures(
 # ----------------------------------------------------------------------------- fit
 @dataclass
 class PanelRiskModel:
+    """Fitted daily factor returns, residuals and exposures (see module docstring)."""
+
     factors: list[str]
     factor_returns: pd.DataFrame  # date x factor, return earned from d to d+1
     residuals: pd.DataFrame  # date x asset, same timing
@@ -112,7 +114,7 @@ class PanelRiskModel:
     n: pd.Series  # assets per day
 
     def loadings(self, weights: pd.DataFrame) -> pd.DataFrame:
-        """Portfolio loadings ``x_k(d) = sum_i w_i(d) B_ik(d)`` for long weights (date, asset, weight)."""
+        """Portfolio loadings x_k(d) = Σ_i w_i(d) B_ik(d) for long weights (date, asset, weight)."""
         m = weights.merge(self.exposures, on=["date", "asset"], how="inner")
         for k in self.factors:
             m[k] = m[k] * m["weight"]

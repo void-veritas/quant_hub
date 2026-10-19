@@ -60,7 +60,8 @@ def test_recovers_factor_returns_and_exposures():
 def test_forecast_is_calibrated_and_attribution_adds_up():
     panel, caps, _ = synthetic(n_days=600, seed=1)
     expo = prm.build_exposures(panel, caps=caps, momentum_days=5, funding_days=5)
-    model = prm.fit(panel, expo, factors=("market", "size", "vol"))
+    # no winsorisation here so that factor + idio PnL reproduces the realised return exactly
+    model = prm.fit(panel, expo, factors=("market", "size", "vol"), winsor_sd=1e6)
     rng = np.random.default_rng(2)
     # a long-short book tilted on size, rebalanced daily
     w = expo[["date", "asset", "size"]].copy()

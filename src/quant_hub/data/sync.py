@@ -1,4 +1,4 @@
-"""Mirror the raw data layer to/from an S3 bucket (boto3, no aws CLI needed).
+r"""Mirror the raw data layer to/from an S3 bucket (boto3, no aws CLI needed).
 
     uv run python -m quant_hub.data.sync push --bucket yolo-research-ep [--dataset funding] \\
         [--force] [--dry-run]

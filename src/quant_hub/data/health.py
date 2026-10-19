@@ -1,4 +1,4 @@
-"""One-command health report of the raw data layer.
+r"""One-command health report of the raw data layer.
 
     uv run python -m quant_hub.data.health [--dataset ohlcv_1d] [--exchange binance] \\
         [--assets BTC,ETH] [--stale-days 3] [--all]
