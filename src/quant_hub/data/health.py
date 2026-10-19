@@ -33,6 +33,8 @@ SCHEDULE = {
     "funding": None,  # hourly on HL, 8h/4h on Binance: inferred per asset
 }
 OHLCV = {"ohlcv_15m", "ohlcv_1d"}
+# datasets whose source is known to lack some days: flag only above this many missing
+KNOWN_MISSING_DAYS = {"hl_l2_hour": 30}  # the HL archive lacks ~25 venue days (2% of history)
 
 
 def _event_gaps(ts: pd.Series, tolerance: float = 2.5) -> pd.DataFrame:
@@ -160,7 +162,8 @@ def flag(df: pd.DataFrame, stale_days: float = 3.0) -> pd.DataFrame:
     if df.empty:
         return df
     live = df["status"].isin(["", "trading"])  # delisted instruments are stale by nature
-    bad = (df["problems"] != "") | (df["missing"] > 0) | ((df["stale_days"] > stale_days) & live)
+    tol = df["dataset"].map(KNOWN_MISSING_DAYS).fillna(0)
+    bad = (df["problems"] != "") | (df["missing"] > tol) | ((df["stale_days"] > stale_days) & live)
     return df[bad]
 
 
