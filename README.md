@@ -18,6 +18,9 @@ The `quant_hub` package is installed editable, so it's importable from notebooks
 src/quant_hub/
   data/          ingestion CLI, loaders (DuckDB), partitioned storage, validation, S3 sync
     connectors/  hyperliquid (API), hl_archive (S3 L2), binance (Vision dumps), robotwealth (API), scrapingbee
+  commodities/   separate data domain (own bucket, layers raw/reference/curated): storage, sync, health,
+                 ingestion CLI (hip3, databento, cot, futures), migrate; connectors/ databento (cost-gated),
+                 cftc (COT), futures_daily (Yahoo/Stooq continuous)
   universe.py    point-in-time universes (market cap, liquidity)
   alpha/         signals, features, momentum, funding signals
   risk/          volatility, covariance, factor_model, panel_risk_model, tail, hedging, exposures, leverage, drawdown
@@ -29,7 +32,7 @@ src/quant_hub/
   utils/         config (.env), state_space (Kalman)
 
 config/          instruments.csv (asset registry), hl_lot_sizes.json
-data/            raw -> external (contents gitignored; catalogue in data/README.md)
+data/            raw -> external (crypto) and commodities/ (contents gitignored; catalogue in data/README.md)
 docs/            toolkit_map.md (Paleologo results -> modules), single_factor_testing_pipeline.md
 tests/           pytest (toolkit invariants, data layer, backtester semantics, validation, PIT, live scenarios)
 ```
@@ -170,6 +173,29 @@ synthetic rows (HL daily), duplicate or unsorted timestamps, OHLCV sanity
 funding uses the local cadence, so the 8h→1h switch on HL is not a gap), and
 staleness of the last bar. Exit code 1 when anything is flagged; delisted
 instruments are not flagged for staleness.
+
+### Commodities domain (`commodities/`)
+
+Paid and commodity data live apart from the crypto layer: `data/commodities/{raw,reference,curated}`,
+mirrored to `s3://yolo-commodities-ep`, never seen by the crypto `sync`/`health`. Same partition
+layout and `write_partition` as the crypto raw layer. Datasets: HIP-3 perps on Hyperliquid
+(`ohlcv_1d`, `funding`, exchange=hyperliquid_hip3), `futures_1d` (Databento GLBX.MDP3 daily bars
+per contract, exchange=cme), `futures_cont_1d` (Yahoo/Stooq continuous, cross-checks only),
+`cot_disagg` (CFTC); the DBN files Databento delivered stay under `raw/databento/` with a JSON
+sidecar (request, cost, licence).
+
+```
+uv run python -m quant_hub.commodities.sync pull|push                       # bucket yolo-commodities-ep
+uv run python -m quant_hub.commodities.health [--all]                       # domain rules (expired contracts, delisted HIP-3)
+uv run python -m quant_hub.commodities.ingestion hip3                       # HIP-3 bars + funding + reference/hip3_markets.csv
+uv run python -m quant_hub.commodities.ingestion databento --symbols HG.FUT --schema ohlcv-1d --max-usd 1.74 [--estimate-only]
+uv run python -m quant_hub.commodities.ingestion cot | futures --assets HG  # free sources (CFTC, Yahoo/Stooq)
+uv run python -m quant_hub.commodities.migrate [--dry-run]                  # one-off: HIP-3 and TC/RC out of the crypto bucket
+```
+
+`databento` always calls the free cost estimate first and refuses above `--max-usd`
+(`DATABENTO_API_KEY` in the environment or `.env`). Rule: cost table first, download
+after an explicit yes.
 
 ### Writing rules
 

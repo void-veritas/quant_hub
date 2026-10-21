@@ -1,0 +1,375 @@
+"""Commodities domain: storage roots, sync layers, cost-gated Databento, HIP-3, health, migrate."""
+
+import io
+import json
+import zipfile
+
+import pandas as pd
+import pytest
+from tests.test_data_layer import _FakeS3
+
+from quant_hub.commodities import health, hip3, migrate, storage
+from quant_hub.commodities.connectors import cftc, futures_daily
+from quant_hub.commodities.connectors import databento as dbn
+
+
+@pytest.fixture
+def croot(tmp_path, monkeypatch):
+    root = tmp_path / "commodities"
+    monkeypatch.setattr(storage, "COMMODITIES_ROOT", root)
+    monkeypatch.setattr(storage, "RAW_ROOT", root / "raw")
+    monkeypatch.setattr(storage, "REFERENCE_ROOT", root / "reference")
+    monkeypatch.setattr(storage, "CURATED_ROOT", root / "curated")
+    return root
+
+
+def _bars(symbol, start, n, freq="1D"):
+    ts = pd.date_range(start, periods=n, freq=freq, tz="UTC")
+    return pd.DataFrame(
+        dict(ts=ts, open=4.0, high=4.1, low=3.9, close=4.05, volume=10, symbol=symbol)
+    )
+
+
+# --- storage and sync -------------------------------------------------------------
+
+
+def test_storage_layers_and_partitions(croot):
+    assert storage.write_partition(_bars("HGZ6", "2026-01-01", 3), "futures_1d", "cme", "HGZ6") == 3
+    parts = storage.list_partitions("futures_1d")
+    assert parts.iloc[0]["path"].startswith(str(croot / "raw" / "futures_1d"))
+    assert storage.coverage("futures_1d").iloc[0]["rows"] == 3
+    assert storage.list_partitions("nothing").empty
+    p = storage.layer_path("reference", "tcrc", "benchmarks.csv")
+    assert p == croot / "reference" / "tcrc" / "benchmarks.csv" and p.parent.exists()
+    with pytest.raises(ValueError, match="unknown layer"):
+        storage.layer_path("external", "x")
+
+
+def test_sync_mirrors_the_three_layers_only(tmp_path):
+    from quant_hub.commodities import sync
+
+    root = tmp_path / "commodities"
+    for rel in (
+        "raw/futures_1d/exchange=cme/asset=HGZ6/year=2026/data.parquet",
+        "reference/tcrc/benchmarks.csv",
+        "curated/copper_front.parquet",
+        "external/not_a_layer.csv",
+        "raw/databento/x.dbn.zst",
+    ):
+        f = root / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x" * 10)
+    s3 = _FakeS3()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(storage, "COMMODITIES_ROOT", root)
+        mp.setattr(sync, "COMMODITIES_ROOT", root)
+        assert sync.push("b", s3=s3) == 4
+        assert set(s3.objects) == {
+            "raw/futures_1d/exchange=cme/asset=HGZ6/year=2026/data.parquet",
+            "reference/tcrc/benchmarks.csv",
+            "curated/copper_front.parquet",
+            "raw/databento/x.dbn.zst",
+        }
+        assert sync.push("b", dataset="futures_1d", s3=s3) == 0
+        (root / "curated/copper_front.parquet").unlink()
+        assert sync.pull("b", s3=s3) == 1 and (root / "curated/copper_front.parquet").exists()
+
+
+# --- Databento -------------------------------------------------------------------
+
+
+class _Meta:
+    def __init__(self, usd, size):
+        self.usd, self.size = usd, size
+        self.calls = []
+
+    def get_cost(self, **kw):
+        self.calls.append(("cost", kw))
+        return self.usd
+
+    def get_billable_size(self, **kw):
+        return self.size
+
+    def get_dataset_range(self, dataset):
+        return {"start": "2010-06-06T00:00:00", "end": "2026-10-21T00:00:00"}
+
+
+class _Timeseries:
+    def __init__(self):
+        self.calls = []
+
+    def get_range(self, path=None, **kw):
+        self.calls.append(kw)
+        with open(path, "wb") as fh:
+            fh.write(b"DBN")
+        df = _bars("HGZ6", "2026-01-01", 2).drop(columns="symbol")
+        df["symbol"] = ["HGZ6", "HGZ6"]
+        df["instrument_id"] = 42
+        return df.rename(columns={"ts": "ts_event"}).set_index("ts_event")
+
+
+class _FakeClient:
+    def __init__(self, usd=1.74, size=10_000_000):
+        self.metadata = _Meta(usd, size)
+        self.timeseries = _Timeseries()
+
+
+def test_databento_refuses_above_the_limit_without_downloading(tmp_path):
+    cli = _FakeClient(usd=1.75)
+    req = dbn.request(["HG.FUT"], "ohlcv-1d", "2010-06-06", "2026-10-21")
+    est = dbn.estimate(req, cli)
+    assert est.usd == 1.75 and est.mb == 10.0
+    with pytest.raises(dbn.CostLimitExceeded, match="1.75 USD"):
+        dbn.fetch(req, max_usd=1.74, cli=cli, store_dir=tmp_path)
+    assert cli.timeseries.calls == [] and not list(tmp_path.iterdir())
+
+
+def test_databento_fetch_keeps_the_file_and_a_sidecar(tmp_path):
+    cli = _FakeClient(usd=1.74)
+    req = dbn.request(["HG.FUT"], "ohlcv-1d", "2010-06-06", "2026-10-21")
+    store, path = dbn.fetch(req, max_usd=1.74, cli=cli, store_dir=tmp_path)
+    assert path.name == "GLBX.MDP3_ohlcv-1d_HG.FUT_2010-06-06_2026-10-21.dbn.zst"
+    assert path.read_bytes() == b"DBN"
+    assert cli.timeseries.calls == [req]
+    side = json.loads(path.with_suffix("").with_suffix(".json").read_text())
+    assert side["request"] == req and side["estimate"]["usd"] == 1.74 and "licence" in side
+    assert side["max_usd"] == 1.74
+    assert dbn.dataset_end(cli=cli) == "2026-10-21"
+
+
+def test_databento_bars_per_contract(croot):
+    df = _bars("HGZ6", "2026-01-01", 2).drop(columns="symbol")
+    df["symbol"] = ["HGZ6", "HGH7-HGZ6"]
+    df["instrument_id"] = [1, 2]
+    bars = dbn.bars_to_frame(df.rename(columns={"ts": "ts_event"}).set_index("ts_event"))
+    assert list(bars.columns) == dbn.BARS and bars["ts"].dt.tz is not None
+    assert dbn.write_bars(bars) == 2
+    parts = storage.list_partitions("futures_1d")
+    assert sorted(parts["asset"]) == ["HGH7-HGZ6", "HGZ6"] and set(parts["exchange"]) == {"cme"}
+
+
+def test_databento_symbol_helpers():
+    assert dbn.root_of("HGZ6") == "HG" and dbn.root_of("HGZ26") == "HG"
+    assert dbn.root_of("HGZ6-HGH7") == "HG" and dbn.is_spread("HGZ6-HGH7")
+    assert dbn.root_of("ZSX6") == "ZS" and dbn.expiry_code("ZSX6") == "X6"
+    assert dbn.expiry_code("HGZ6-HGH7") is None and dbn.root_of("HG.FUT") is None
+
+
+# --- HIP-3 -----------------------------------------------------------------------
+
+
+def test_hip3_names_and_markets_table():
+    assert hip3.asset_of("xyz:COPPER") == "xyz-COPPER"
+    assert hip3.is_commodity("xyz:COPPER") and hip3.is_commodity("xyz:CL")
+    assert hip3.is_commodity("xyz:BRENTOIL") and not hip3.is_commodity("xyz:TSLA")
+    meta = {
+        "xyz": [{"name": "xyz:COPPER", "isDelisted": False, "szDecimals": 2, "maxLeverage": 10}],
+        "flx": [{"name": "flx:COPPER", "isDelisted": True, "szDecimals": 1, "maxLeverage": 5}],
+    }
+    t = hip3.markets_table(meta, pd.Timestamp("2026-10-21T12:00:00Z"))
+    assert list(t.columns) == hip3.MARKETS_COLUMNS
+    assert t.set_index("asset")["delisted"].to_dict() == {"xyz-COPPER": False, "flx-COPPER": True}
+
+
+# --- health ----------------------------------------------------------------------
+
+
+def test_health_rules_of_the_domain(croot):
+    now = pd.Timestamp("2026-10-21", tz="UTC")
+    # HIP-3: live xyz stale, delisted flx stale, xyz with a gap
+    storage.write_partition(
+        _bars("xyz:GOLD", "2026-10-01", 20), "ohlcv_1d", hip3.EXCHANGE, "xyz-GOLD"
+    )
+    storage.write_partition(
+        _bars("xyz:COPPER", "2026-10-01", 10), "ohlcv_1d", hip3.EXCHANGE, "xyz-COPPER"
+    )
+    storage.write_partition(
+        _bars("flx:COPPER", "2026-06-01", 10), "ohlcv_1d", hip3.EXCHANGE, "flx-COPPER"
+    )
+    gap = pd.concat(
+        [
+            _bars("xyz:SILVER", "2026-10-01", 20).iloc[:5],
+            _bars("xyz:SILVER", "2026-10-01", 20).iloc[8:],
+        ]
+    )
+    storage.write_partition(gap, "ohlcv_1d", hip3.EXCHANGE, "xyz-SILVER")
+    hip3.markets_table(
+        {
+            "xyz": [{"name": "xyz:COPPER"}, {"name": "xyz:GOLD"}, {"name": "xyz:SILVER"}],
+            "flx": [{"name": "flx:COPPER", "isDelisted": True}],
+        },
+        now,
+    ).to_csv(hip3.markets_path(), index=False)
+    # futures: expired contract (old) and a live one; a sparse far contract; a spread
+    storage.write_partition(_bars("HGU6", "2026-08-01", 30), "futures_1d", "cme", "HGU6")
+    storage.write_partition(_bars("HGZ6", "2026-09-22", 30), "futures_1d", "cme", "HGZ6")
+    storage.write_partition(_bars("HGZ7", "2026-09-01", 10, freq="5D"), "futures_1d", "cme", "HGZ7")
+    # COT: weekly, last report 10 days ago -> fine under the 14-day rule
+    storage.write_partition(
+        _bars("c", "2026-07-07", 15, freq="7D").drop(columns=["open", "high", "low", "close"]),
+        "cot_disagg",
+        "cftc",
+        "085692",
+    )
+
+    df = health.report(now=now)
+    st = df.set_index(["dataset", "asset"])["status"]
+    assert (
+        st[("ohlcv_1d", "flx-COPPER")] == "delisted" and st[("ohlcv_1d", "xyz-GOLD")] == "trading"
+    )
+    assert st[("futures_1d", "HGZ6")] == "contract"
+    bad = health.flag(df)
+    flagged = set(zip(bad["dataset"], bad["asset"], strict=True))
+    assert ("ohlcv_1d", "xyz-COPPER") in flagged  # live and stale
+    assert ("ohlcv_1d", "xyz-SILVER") in flagged  # gap on the daily grid
+    assert ("ohlcv_1d", "xyz-GOLD") not in flagged
+    assert ("ohlcv_1d", "flx-COPPER") not in flagged  # delisted
+    assert not any(d == "futures_1d" for d, _ in flagged)  # root HG is fresh via HGZ6
+    assert ("cot_disagg", "085692") not in flagged
+    # when every contract of the root goes quiet, exactly the newest one is flagged
+    late = health.report(now=now + pd.Timedelta(days=10))
+    fut = health.flag(late)
+    assert fut[fut["dataset"] == "futures_1d"]["asset"].tolist() == ["HGZ6"]
+    assert health.flag(late, stale_days=100.0).empty is False  # xyz-SILVER's gap stays flagged
+
+
+def test_health_without_data_is_empty(croot):
+    assert health.report().empty and health.main([]) == 0
+
+
+# --- migrate ---------------------------------------------------------------------
+
+
+class _MoveS3(_FakeS3):
+    def __init__(self):
+        super().__init__()
+        self.deleted = []
+
+    def copy_object(self, Bucket, Key, CopySource, MetadataDirective):
+        body, meta, t = self.objects[("src", CopySource["Key"])]
+        self.objects[(Bucket, Key)] = (body, dict(meta), t)
+
+    def head_object(self, Bucket, Key):
+        body, meta, _ = self.objects[(Bucket, Key)]
+        return {"Metadata": meta, "ContentLength": len(body)}
+
+    def delete_object(self, Bucket, Key):
+        self.deleted.append((Bucket, Key))
+        del self.objects[(Bucket, Key)]
+
+    def list_objects_v2(self, Bucket, Prefix="", MaxKeys=1000, ContinuationToken=None):
+        items = [
+            {"Key": k, "Size": len(b), "LastModified": t.to_pydatetime()}
+            for (bk, k), (b, _, t) in self.objects.items()
+            if bk == Bucket and k.startswith(Prefix)
+        ]
+        return {"Contents": items, "IsTruncated": False}
+
+
+def test_migrate_moves_only_commodity_keys_and_verifies(tmp_path):
+    s3 = _MoveS3()
+    keys = [
+        "raw/ohlcv_1d/exchange=hyperliquid_hip3/asset=xyz-COPPER/year=2026/data.parquet",
+        "raw/funding/exchange=hyperliquid_hip3/asset=flx-GAS/year=2026/data.parquet",
+        "external/tcrc/benchmarks.csv",
+        "raw/ohlcv_1d/exchange=hyperliquid/asset=BTC/year=2026/data.parquet",
+        "external/rw/x.feather",
+    ]
+    for k in keys:
+        s3.objects[("src", k)] = (b"abc", {"sha256": "h"}, pd.Timestamp.now(tz="UTC"))
+    assert migrate.destination_key(keys[2]) == "reference/tcrc/benchmarks.csv"
+    assert migrate.destination_key(keys[3]) is None
+    assert len(migrate.move_objects(s3, "src", "dst", dry_run=True)) == 3 and not s3.deleted
+    moved = migrate.move_objects(s3, "src", "dst")
+    assert moved == sorted(keys[:3])
+    assert ("dst", "reference/tcrc/benchmarks.csv") in s3.objects
+    assert ("src", keys[0]) not in s3.objects and ("src", keys[3]) in s3.objects
+    # local move
+    root, dest = tmp_path / "data", tmp_path / "data" / "commodities"
+    for rel in (keys[0], keys[2], keys[3]):
+        f = root / rel
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"x")
+    assert sorted(migrate.move_local(root, dest)) == [
+        "asset=xyz-COPPER/year=2026/data.parquet",
+        "benchmarks.csv",
+    ]
+    assert (dest / keys[0]).exists() and (dest / "reference/tcrc/benchmarks.csv").exists()
+    assert (root / keys[3]).exists() and not (root / "external/tcrc").exists()
+
+
+# --- free connectors (parsers on fixtures shaped like the real payloads) ---------
+
+CFTC_HEADER = (
+    "Market_and_Exchange_Names,As_of_Date_In_Form_YYMMDD,Report_Date_as_YYYY-MM-DD,"
+    "CFTC_Contract_Market_Code,CFTC_Market_Code,Open_Interest_All,Prod_Merc_Positions_Long_All,"
+    "Prod_Merc_Positions_Short_All,Swap_Positions_Long_All,Swap__Positions_Short_All,"
+    "Swap__Positions_Spread_All,M_Money_Positions_Long_All,M_Money_Positions_Short_All,"
+    "M_Money_Positions_Spread_All,Other_Rept_Positions_Long_All,Other_Rept_Positions_Short_All,"
+    "Other_Rept_Positions_Spread_All,NonRept_Positions_Long_All,NonRept_Positions_Short_All,"
+    "Traders_Tot_All"
+)
+
+
+def _zip(rows: list[str]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("f_year.txt", "\n".join([CFTC_HEADER, *rows]) + "\n")
+    return buf.getvalue()
+
+
+def test_cftc_parse_normalises_columns_and_codes():
+    rows = [
+        '"COPPER- #1 - COMMODITY EXCHANGE INC.",241015,2024-10-15,85692,CMX,'
+        "250000,40000,90000,20000,15000,3000,70000,25000,9000,10000,8000,2000,6000,5000,210",
+        '"GOLD - COMMODITY EXCHANGE INC.",241015,2024-10-15,088691,CMX,'
+        "500000,1,2,3,4,5,6,7,8,9,10,11,12,13,300",
+        '"COPPER- #1 - COMMODITY EXCHANGE INC.",241015,2024-10-15,085692,CMX,'
+        "250000,40000,90000,20000,15000,3000,70000,25000,9000,10000,8000,2000,6000,5000,210",
+    ]
+    df = cftc.parse(_zip(rows))
+    assert set(df["code"]) == {"085692", "088691"}
+    cu = df[df["code"] == cftc.COPPER_CODE].iloc[0]
+    assert cu["ts"] == pd.Timestamp("2024-10-15", tz="UTC")
+    assert cu["mm_long"] == 70000 and cu["mm_short"] == 25000 and cu["swap_short"] == 15000
+    assert cu["open_interest"] == 250000 and len(df) == 2
+    urls = cftc.file_urls(2006, 2018)
+    assert urls[0].endswith("fut_disagg_txt_hist_2006_2016.zip") and len(urls) == 3
+    with pytest.raises(ValueError, match="unexpected CFTC layout"):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("x.txt", "a,b\n1,2\n")
+        cftc.parse(buf.getvalue())
+
+
+def test_free_futures_parsers():
+    payload = {
+        "chart": {
+            "result": [
+                {
+                    "meta": {"exchangeTimezoneName": "America/New_York"},
+                    "timestamp": [1728964800, 1729051200, 1729137600],
+                    "indicators": {
+                        "quote": [
+                            {
+                                "open": [4.3, 4.31, None],
+                                "high": [4.4, 4.35, None],
+                                "low": [4.2, 4.28, None],
+                                "close": [4.35, 4.3, None],
+                                "volume": [100, 120, None],
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    }
+    df = futures_daily.parse_yahoo(payload, "HG=F")
+    assert list(df["ts"]) == [
+        pd.Timestamp("2024-10-15", tz="UTC"),
+        pd.Timestamp("2024-10-16", tz="UTC"),
+    ]
+    text = "Date,Open,High,Low,Close,Volume\n2024-10-15,4.3,4.4,4.2,4.35,100\n"
+    assert len(futures_daily.parse_stooq(text, "hg.f")) == 1
+    with pytest.raises(ValueError, match="no CSV"):
+        futures_daily.parse_stooq("Exceeded the daily hits limit", "hg.f")

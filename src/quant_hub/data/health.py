@@ -31,8 +31,12 @@ SCHEDULE = {
     "hl_l2_hour": "1D",
     "open_interest": "5min",
     "funding": None,  # hourly on HL, 8h/4h on Binance: inferred per asset
+    # commodities domain (quant_hub.commodities.health): trading days, inferred
+    "futures_1d": None,
+    "futures_cont_1d": None,
+    "cot_disagg": None,  # weekly (Tuesdays), holiday shifts
 }
-OHLCV = {"ohlcv_15m", "ohlcv_1d"}
+OHLCV = {"ohlcv_15m", "ohlcv_1d", "futures_1d", "futures_cont_1d"}
 # datasets whose source is known to lack some days: flag only above this many missing
 KNOWN_MISSING_DAYS = {"hl_l2_hour": 30}  # the HL archive lacks ~25 venue days (2% of history)
 

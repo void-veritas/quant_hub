@@ -22,8 +22,8 @@ Coverage on 2026-10-12 (`quant_hub.data.storage.coverage(dataset)` prints the li
 External layer (`data/external`, synced like raw): `rw/` (RW bulk files; `coincodex_marketcap.feather` is
 frozen at 2026-01-22, RW no longer updates it), `coincodex/` (its continuation from CoinCodex's public
 endpoints: `tickers.csv`, `marketcap_daily.parquet`; `python -m quant_hub.data.marketcap cx-snapshot` daily),
-`coingecko/` (one year of CoinGecko caps for 682 coins, cross-check only), `tcrc/` (copper TC/RC benchmarks,
-commodities draft). `quant_hub.data.marketcap.load_marketcap()` is the one loader for the universe.
+`coingecko/` (one year of CoinGecko caps for 682 coins, cross-check only).
+`quant_hub.data.marketcap.load_marketcap()` is the one loader for the universe.
 
 Checks: `python -m quant_hub.data.health` (gaps, duplicates, sanity, staleness; exit 1 if flagged;
 `--cross-venue` compares HL and Binance daily closes per asset). Sync is content-based and protects
@@ -49,6 +49,23 @@ Quirks worth knowing:
 3. Funding sign convention in raw data is venue-native; the YOLO panel converts to "paid to the long".
 4. `hl_l2_hour` rows are stamped with the archive file's nominal hour; ~2% of venue days are missing
    and are filled from Binance at the same hour by `yolo.panel.hl_decision_prices` (flag `filled`).
+
+## Commodities domain (`data/commodities/`, bucket `s3://yolo-commodities-ep`)
+
+Separate from the crypto layers above (paid data, own IAM, own sync): `raw/`, `reference/`,
+`curated/`, mirrored with `python -m quant_hub.commodities.sync pull|push`, checked with
+`python -m quant_hub.commodities.health`. Moved here on 2026-10-21 from the crypto bucket
+(`quant_hub.commodities.migrate`): HIP-3 perps and the TC/RC benchmark file.
+
+| layer/dataset | exchange | assets | source | notes |
+|---|---|---|---|---|
+| `raw/ohlcv_1d`, `raw/funding` | hyperliquid_hip3 | commodity markets of the builder dexes `xyz` (live) and `flx` (delisted 2026-06) | HL API, `ingestion hip3` | asset = `<dex>-<NAME>` (`xyz-COPPER`); the L2 archive does not cover these markets |
+| `raw/futures_1d` | cme | one asset per contract (`HGZ6`) or calendar spread (`HGZ6-HGH7`) | Databento GLBX.MDP3 `ohlcv-1d`, parent symbology (`HG.FUT`), `ingestion databento` | bars per UTC day, close = last trade (settlement and OI: `statistics` schema, not bought yet); bars only on days with trades |
+| `raw/databento/` | | | the DBN files as delivered + JSON sidecar (request, estimate, purchase time, licence) | not for redistribution |
+| `raw/futures_cont_1d` | yahoo, stooq | roots (`HG`) | `ingestion futures` | continuous front month: roll jumps, cross-checks only |
+| `raw/cot_disagg` | cftc | CFTC market code (copper `085692`) | `ingestion cot` | `ts` = report Tuesday; published the Friday after |
+| `reference/hip3_markets.csv` | | | written by `ingestion hip3` | delisted flag, lot size, leverage (health reads it) |
+| `reference/tcrc/benchmarks.csv` | | | annual TC/RC benchmark 2010–2026 (hand-collected, `verified` column) | |
 
 ## External files (`data/external/rw/`, from the Robot Wealth API and CDN)
 

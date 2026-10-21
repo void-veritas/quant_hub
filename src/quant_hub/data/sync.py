@@ -40,9 +40,11 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _local_files(root: Path, dataset: str | None) -> dict[str, Path]:
+def _local_files(
+    root: Path, dataset: str | None, prefixes: tuple[str, ...] = PREFIXES
+) -> dict[str, Path]:
     out: dict[str, Path] = {}
-    for prefix in PREFIXES:
+    for prefix in prefixes:
         base = root / prefix
         if not base.exists():
             continue
@@ -98,11 +100,16 @@ def push(
     force: bool = False,
     dry_run: bool = False,
     s3=None,
+    prefixes: tuple[str, ...] = PREFIXES,
 ) -> int:
-    """Upload local files that are missing in the bucket or whose content differs."""
+    """Upload local files that are missing in the bucket or whose content differs.
+
+    `prefixes` are the top-level layers mirrored under `root` (the commodities domain
+    passes its own: raw / reference / curated).
+    """
     s3 = s3 or _client()
     remote = _remote_index(s3, bucket, dataset)
-    local = _local_files(root, dataset)
+    local = _local_files(root, dataset, prefixes)
 
     def _decide(item):
         rel, p = item
@@ -144,6 +151,7 @@ def pull(
     dry_run: bool = False,
     s3=None,
     merge: bool = False,
+    prefixes: tuple[str, ...] = PREFIXES,
 ) -> int:
     """Download bucket files that are missing locally or whose content differs.
 
@@ -155,7 +163,7 @@ def pull(
     """
     s3 = s3 or _client()
     remote = _remote_index(s3, bucket, dataset)
-    local = _local_files(root, None)
+    local = _local_files(root, None, prefixes)
 
     def _decide(key):
         p = local.get(key)
