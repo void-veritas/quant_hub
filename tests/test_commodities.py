@@ -190,6 +190,9 @@ def test_health_rules_of_the_domain(croot):
     storage.write_partition(
         _bars("flx:COPPER", "2026-06-01", 10), "ohlcv_1d", hip3.EXCHANGE, "flx-COPPER"
     )
+    quiet = _bars("xyz:NATGAS", "2026-10-01", 20)
+    quiet.loc[quiet.index[5], "volume"] = 0  # a day without trades is not a gap
+    storage.write_partition(quiet, "ohlcv_1d", hip3.EXCHANGE, "xyz-NATGAS")
     gap = pd.concat(
         [
             _bars("xyz:SILVER", "2026-10-01", 20).iloc[:5],
@@ -199,7 +202,12 @@ def test_health_rules_of_the_domain(croot):
     storage.write_partition(gap, "ohlcv_1d", hip3.EXCHANGE, "xyz-SILVER")
     hip3.markets_table(
         {
-            "xyz": [{"name": "xyz:COPPER"}, {"name": "xyz:GOLD"}, {"name": "xyz:SILVER"}],
+            "xyz": [
+                {"name": "xyz:COPPER"},
+                {"name": "xyz:GOLD"},
+                {"name": "xyz:SILVER"},
+                {"name": "xyz:NATGAS"},
+            ],
             "flx": [{"name": "flx:COPPER", "isDelisted": True}],
         },
         now,
@@ -208,6 +216,8 @@ def test_health_rules_of_the_domain(croot):
     storage.write_partition(_bars("HGU6", "2026-08-01", 30), "futures_1d", "cme", "HGU6")
     storage.write_partition(_bars("HGZ6", "2026-09-22", 30), "futures_1d", "cme", "HGZ6")
     storage.write_partition(_bars("HGZ7", "2026-09-01", 10, freq="5D"), "futures_1d", "cme", "HGZ7")
+    neg = _bars("HGZ6-HGH7", "2026-10-01", 10).assign(open=-0.1, high=-0.05, low=-0.2, close=-0.1)
+    storage.write_partition(neg, "futures_1d", "cme", "HGZ6-HGH7")
     # COT: weekly, last report 10 days ago -> fine under the 14-day rule
     storage.write_partition(
         _bars("c", "2026-07-07", 15, freq="7D").drop(columns=["open", "high", "low", "close"]),
@@ -227,8 +237,10 @@ def test_health_rules_of_the_domain(croot):
     assert ("ohlcv_1d", "xyz-COPPER") in flagged  # live and stale
     assert ("ohlcv_1d", "xyz-SILVER") in flagged  # gap on the daily grid
     assert ("ohlcv_1d", "xyz-GOLD") not in flagged
+    assert ("ohlcv_1d", "xyz-NATGAS") not in flagged  # zero-volume day, stored
     assert ("ohlcv_1d", "flx-COPPER") not in flagged  # delisted
-    assert not any(d == "futures_1d" for d, _ in flagged)  # root HG is fresh via HGZ6
+    assert not any(d == "futures_1d" for d, _ in flagged)  # root HG is fresh; negative spread ok
+    assert df.set_index("asset").loc["HGZ6-HGH7", "problems"] == ""
     assert ("cot_disagg", "085692") not in flagged
     # when every contract of the root goes quiet, exactly the newest one is flagged
     late = health.report(now=now + pd.Timedelta(days=10))

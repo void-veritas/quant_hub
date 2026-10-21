@@ -7,10 +7,12 @@ Same per-asset table as `quant_hub.data.health` (first/last, rows, duplicates, O
 sanity, gaps, staleness) over `data/commodities/raw`, with rules that fit the domain:
 
 - HIP-3 perps (`ohlcv_1d`, `funding`): daily grid; a market flagged delisted in
-  `reference/hip3_markets.csv` is stale by nature and not reported as such;
+  `reference/hip3_markets.csv` is stale by nature and not reported as such; a day
+  without trades is stored as a zero-volume bar and is not a gap;
 - `futures_1d` (one asset per contract): bars exist only on days with trades, so gaps
   are counted but never flagged; staleness is judged per product root (the newest bar
-  across all its contracts), because an expired contract is not a stale feed;
+  across all its contracts), because an expired contract is not a stale feed; calendar
+  spreads (`HGZ6-HGH7`) legitimately trade at negative prices;
 - `futures_cont_1d`, `cot_disagg`: weekends and holidays are not gaps; staleness
   thresholds are 5 and 14 days (COT is weekly and published with a 3-day lag).
 
@@ -25,7 +27,7 @@ import sys
 import pandas as pd
 
 from quant_hub.commodities import hip3, storage
-from quant_hub.commodities.connectors.databento import root_of
+from quant_hub.commodities.connectors.databento import is_spread, root_of
 from quant_hub.data import health as _health
 
 STALE_DAYS = {
@@ -62,6 +64,10 @@ def _hip3_status() -> dict[tuple[str, str], str]:
     }
 
 
+def _drop_sign_problems(problems: str) -> str:
+    return "; ".join(p for p in problems.split("; ") if p and "non-positive" not in p)
+
+
 def report(
     datasets: list[str] | None = None,
     exchange: str | None = None,
@@ -77,6 +83,9 @@ def report(
     if df.empty:
         return df
     status = _hip3_status()
+    # calendar spreads trade at negative prices: the sign check does not apply to them
+    spread = (df["dataset"] == "futures_1d") & df["asset"].map(is_spread)
+    df.loc[spread, "problems"] = df.loc[spread, "problems"].map(_drop_sign_problems)
     df["status"] = [
         status.get((ex, a), "contract" if ds == "futures_1d" else "")
         for ds, ex, a in zip(df["dataset"], df["exchange"], df["asset"], strict=True)
@@ -90,7 +99,8 @@ def flag(df: pd.DataFrame, stale_days: float | None = None) -> pd.DataFrame:
         return df
     limit = df["dataset"].map(STALE_DAYS).fillna(3.0) if stale_days is None else stale_days
     bad = df["problems"] != ""
-    bad |= (df["missing"] > 0) & df["dataset"].isin(GAPS_FLAGGED)
+    # a zero-volume day of an illiquid perp is stored (synthetic row), not missing
+    bad |= (df["missing"] > df["synthetic_rows"]) & df["dataset"].isin(GAPS_FLAGGED)
     live = ~df["status"].isin(["delisted", "contract"])
     bad |= (df["stale_days"] > limit) & live
     # futures: staleness per product root, attached to that root's newest contract
