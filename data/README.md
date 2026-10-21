@@ -60,7 +60,7 @@ Separate from the crypto layers above (paid data, own IAM, own sync): `raw/`, `r
 | layer/dataset | exchange | assets | source | notes |
 |---|---|---|---|---|
 | `raw/ohlcv_1d`, `raw/funding` | hyperliquid_hip3 | commodity markets of the builder dexes `xyz` (live) and `flx` (delisted 2026-06) | HL API, `ingestion hip3` | asset = `<dex>-<NAME>` (`xyz-COPPER`); the L2 archive does not cover these markets |
-| `raw/futures_1d` | cme | one asset per contract (`HGZ6`) or calendar spread (`HGZ6-HGH7`) | Databento GLBX.MDP3 `ohlcv-1d`, parent symbology (`HG.FUT`), `ingestion databento` | bars per UTC day, close = last trade (settlement and OI: `statistics` schema, not bought yet); bars only on days with trades |
+| `raw/futures_1d` | cme | copper: 120 outright contracts (`HGZ6`) and 1,329 calendar spreads (`HGZ6-HGH7`), 2010-06-06 → 2026-10-20, 176k rows, 3,517 files, 23 MB; bought 2026-10-21 for 1.74 USD | Databento GLBX.MDP3 `ohlcv-1d`, parent symbology (`HG.FUT`), `ingestion databento` | bars per UTC day (Sunday-evening Globex session stamps to Sunday), close = last trade, not settlement (settlement and OI: `statistics` schema, not bought yet); bars only on days with trades; 32 days 2014–2026 marked `degraded` by Databento (`metadata.get_dataset_condition`) |
 | `raw/databento/` | | | the DBN files as delivered + JSON sidecar (request, estimate, purchase time, licence) | not for redistribution |
 | `raw/futures_cont_1d` | yahoo, stooq | roots (`HG`) | `ingestion futures` | continuous front month: roll jumps, cross-checks only |
 | `raw/cot_disagg` | cftc | CFTC market code (copper `085692`) | `ingestion cot` | `ts` = report Tuesday; published the Friday after |
