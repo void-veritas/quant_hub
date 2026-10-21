@@ -18,6 +18,16 @@ Datasets written (all raw, venue-native):
     hl_l2_hour     per-hour L2 summaries from the HL S3 archive (requester pays):
                    first snapshot of the hour (decision-time mid/spread/depth) and
                    hour medians; `l2hour --hour 9` builds the YOLO 09:00 panel
+    cot_disagg     CFTC disaggregated Commitments of Traders, weekly from 2006, every
+                   market (exchange=cftc, asset=CFTC code; copper 085692): `cot`
+    futures_1d     daily continuous front-month commodity futures (exchange=yahoo or
+                   stooq, asset=root, e.g. HG copper): `futures --assets HG,GC`
+    ohlcv_1d,      HIP-3 builder-deployed perps on Hyperliquid (exchange=hyperliquid_hip3,
+    funding        asset=<dex>-<NAME>, e.g. xyz-COPPER): `hip3 --dexes xyz,flx`
+
+    uv run python -m quant_hub.data.ingestion cot     [--start-year 2006]
+    uv run python -m quant_hub.data.ingestion futures --source yahoo --assets HG,GC,SI
+    uv run python -m quant_hub.data.ingestion hip3    --dexes xyz,flx [--all-markets]
 """
 
 from __future__ import annotations
@@ -32,7 +42,7 @@ import pandas as pd
 
 from quant_hub.data import storage, validation
 from quant_hub.data.connectors import binance_connector as bnc
-from quant_hub.data.connectors import hl_archive, scrapingbee
+from quant_hub.data.connectors import cftc, futures_daily, hl_archive, scrapingbee
 from quant_hub.data.connectors import hyperliquid_connector as hl
 from quant_hub.data.instruments import build_instruments, load_instruments, save_instruments
 
@@ -170,7 +180,13 @@ def _fill_binance_day_gaps(asset: str, symbol: str, start: date, end: date) -> i
 
 
 def _ohlcv_hyperliquid(
-    inst: pd.DataFrame, start: date, end: date, interval: str = "15m", refresh: int = 2
+    inst: pd.DataFrame,
+    start: date,
+    end: date,
+    interval: str = "15m",
+    refresh: int = 2,
+    full: bool = False,
+    extend_back: bool = False,
 ) -> None:
     """Backfill bars from the HL API.
 
@@ -181,7 +197,11 @@ def _ohlcv_hyperliquid(
     The API also returns the bar that is still forming. It is never stored: a bar
     is kept only when its whole interval lies in the past. The last `refresh`
     stored bars are re-fetched and overwritten on every run, so a bar that was
-    revised at the venue is picked up on the next pull.
+    revised at the venue is picked up on the next pull. A `start` before the first
+    stored bar re-fetches from `start` when `extend_back` is set (an explicit
+    `--start`; the default start would refetch everything on every run); `full`
+    ignores the stored state and re-fetches [start, end] (the idempotent write
+    dedups), which is the way to repair holes inside the stored range.
     """
     dataset = "ohlcv_1d" if interval == "1d" else "ohlcv_15m"
     step = pd.Timedelta(days=1) if interval == "1d" else pd.Timedelta("15min")
@@ -190,7 +210,7 @@ def _ohlcv_hyperliquid(
         asset, symbol = row["canonical_id"], row["symbol"]
         have = _existing_ts(dataset, "hyperliquid", asset)
         fetch_from = _utc(start)
-        if have.size:
+        if have.size and not full and (fetch_from >= have.min() or not extend_back):
             fetch_from = max(fetch_from, (have.max() - refresh * step).to_pydatetime())
         df = hl.fetch_candles(symbol, interval, fetch_from, _utc(end + timedelta(days=1)))
         df = df[df["ts"] < closed_before]
@@ -213,7 +233,15 @@ def cmd_ohlcv(args) -> None:
     else:
         if args.interval == "1d":
             start = date.fromisoformat(args.start) if args.start else date(2020, 1, 1)
-        _ohlcv_hyperliquid(inst, start, end, interval=args.interval, refresh=args.refresh)
+        _ohlcv_hyperliquid(
+            inst,
+            start,
+            end,
+            interval=args.interval,
+            refresh=args.refresh,
+            full=args.full,
+            extend_back=bool(args.start),
+        )
 
 
 def cmd_funding(args) -> None:
@@ -329,7 +357,103 @@ def cmd_l2hour(args) -> None:
         print(f"l2hour hyperliquid {asset:12s} {len(todo)} days fetched", flush=True)
 
 
-FREQ = {"ohlcv_15m": "15min", "open_interest": "5min"}
+def cmd_cot(args) -> None:
+    """CFTC disaggregated COT, all markets, one partition set per CFTC code."""
+    last = args.end_year or pd.Timestamp.now(tz="UTC").year
+    df = cftc.fetch(args.start_year, last)
+    if args.codes:
+        df = df[df["code"].isin([c.strip().zfill(6) for c in args.codes.split(",")])]
+    n = 0
+    for code, sub in df.groupby("code"):
+        storage.write_partition(sub.drop(columns=["code"]), "cot_disagg", "cftc", code)
+        n += len(sub)
+    cu = df[df["code"] == cftc.COPPER_CODE]
+    print(
+        f"cot: {df['code'].nunique()} markets, {n} rows; copper {len(cu)} weeks "
+        f"{cu['ts'].min()} -> {cu['ts'].max()}",
+        flush=True,
+    )
+
+
+def cmd_futures(args) -> None:
+    """Daily continuous front-month commodity futures (free sources; see connector caveats)."""
+    roots = (
+        list(futures_daily.COMMODITIES)
+        if args.all
+        else [a.strip().upper() for a in args.assets.split(",")]
+    )
+    for root in roots:
+        if root not in futures_daily.COMMODITIES:
+            raise SystemExit(f"unknown root {root}; known: {sorted(futures_daily.COMMODITIES)}")
+        ysym, ssym, _, desc = futures_daily.COMMODITIES[root]
+        if args.source == "yahoo":
+            df = futures_daily.fetch_yahoo(ysym, start=args.start or "1990-01-01", end=args.end)
+        else:
+            if ssym is None:
+                print(f"futures stooq {root:4s} no stooq symbol, skipped", flush=True)
+                continue
+            df = futures_daily.fetch_stooq(ssym)
+        if not df.empty:
+            storage.write_partition(df, "futures_1d", args.source, root)
+        span = f"{df['ts'].min().date()} -> {df['ts'].max().date()}" if len(df) else "-"
+        print(f"futures {args.source} {root:4s} {desc:16s} {len(df)} rows {span}", flush=True)
+        time.sleep(1.0)
+
+
+HIP3_COMMODITY_WORDS = (
+    "COPPER",
+    "GOLD",
+    "SILVER",
+    "PLATINUM",
+    "PALLADIUM",
+    "ALUMIN",
+    "NICKEL",
+    "ZINC",
+    "OIL",
+    "WTI",
+    "BRENT",
+    "NATGAS",
+    "GAS",
+    "URANIUM",
+    "CORN",
+    "WHEAT",
+    "SOY",
+    "COFFEE",
+)
+
+
+def hip3_asset(coin: str) -> str:
+    """'xyz:COPPER' -> 'xyz-COPPER' (a colon is a poor path component on macOS)."""
+    return coin.replace(":", "-")
+
+
+def cmd_hip3(args) -> None:
+    """Daily bars and funding of HIP-3 builder-deployed perps (commodities by default)."""
+    end = _utc(bnc.utc_today() + timedelta(days=1))
+    closed_before = pd.Timestamp.now(tz="UTC").floor("D")
+    for dex in [d.strip() for d in args.dexes.split(",")]:
+        markets = hl.fetch_meta(dex=dex)
+        names = [m["name"] for m in markets]
+        if not args.all_markets:
+            names = [
+                n for n in names if any(w in n.split(":")[-1].upper() for w in HIP3_COMMODITY_WORDS)
+            ]
+        for coin in names:
+            asset = hip3_asset(coin)
+            bars = hl.fetch_candles(coin, "1d", _utc(date(2023, 1, 1)), end)
+            bars = bars[bars["ts"] < closed_before]
+            if not bars.empty:
+                storage.write_partition(bars, "ohlcv_1d", "hyperliquid_hip3", asset)
+            have = _existing_ts("funding", "hyperliquid_hip3", asset)
+            f_from = have.max() + pd.Timedelta("1ms") if have.size else _utc(date(2023, 1, 1))
+            fund = hl.fetch_funding(coin, f_from, end)
+            if not fund.empty:
+                storage.write_partition(fund, "funding", "hyperliquid_hip3", asset)
+            print(f"hip3 {coin:18s} bars {len(bars):4d} funding +{len(fund)}", flush=True)
+            time.sleep(1.1)
+
+
+FREQ = {"ohlcv_15m": "15min", "ohlcv_1d": "1D", "open_interest": "5min"}
 
 
 def cmd_gaps(args) -> None:
@@ -395,6 +519,11 @@ def main() -> None:
         default=2,
         help="hyperliquid: re-fetch and overwrite the last N stored bars (default 2)",
     )
+    ohlcv.add_argument(
+        "--full",
+        action="store_true",
+        help="hyperliquid: ignore stored state and re-fetch [start, end] (repairs holes)",
+    )
     funding = sub.add_parser("funding", help="backfill funding")
     _add_common(funding, ["binance", "hyperliquid"])
     funding.add_argument(
@@ -416,8 +545,27 @@ def main() -> None:
     l2.add_argument("--concurrency", type=int, default=8)
     l2.add_argument("--dry-run", action="store_true", help="print the egress estimate and exit")
 
+    cot = sub.add_parser("cot", help="CFTC disaggregated Commitments of Traders (weekly, 2006+)")
+    cot.add_argument("--start-year", type=int, default=cftc.FIRST_YEAR)
+    cot.add_argument("--end-year", type=int)
+    cot.add_argument("--codes", help="comma-separated CFTC codes to keep (default: all markets)")
+
+    fut = sub.add_parser("futures", help="daily continuous commodity futures (yahoo / stooq)")
+    fgroup = fut.add_mutually_exclusive_group(required=True)
+    fgroup.add_argument("--assets", help="roots, e.g. HG,GC,SI (see connectors/futures_daily.py)")
+    fgroup.add_argument("--all", action="store_true", help="the whole commodity basket")
+    fut.add_argument("--source", choices=["yahoo", "stooq"], default="yahoo")
+    fut.add_argument("--start", help="YYYY-MM-DD (yahoo only; default 1990-01-01)")
+    fut.add_argument("--end", help="YYYY-MM-DD (yahoo only)")
+
+    hip3 = sub.add_parser("hip3", help="HIP-3 builder perps on Hyperliquid: daily bars + funding")
+    hip3.add_argument("--dexes", default="xyz,flx", help="comma-separated builder dex names")
+    hip3.add_argument("--all-markets", action="store_true", help="not only commodities")
+
     gaps = sub.add_parser("gaps", help="report missing bars per asset")
-    gaps.add_argument("--dataset", choices=["ohlcv_15m", "funding", "open_interest"], required=True)
+    gaps.add_argument(
+        "--dataset", choices=["ohlcv_15m", "ohlcv_1d", "funding", "open_interest"], required=True
+    )
     gaps.add_argument("--exchange")
 
     args = parser.parse_args()
@@ -430,6 +578,9 @@ def main() -> None:
         "oi": cmd_oi,
         "gaps": cmd_gaps,
         "l2hour": cmd_l2hour,
+        "cot": cmd_cot,
+        "futures": cmd_futures,
+        "hip3": cmd_hip3,
     }[args.command](args)
 
 

@@ -45,9 +45,19 @@ def _post(payload: dict, retries: int = 6) -> httpx.Response:
     raise RuntimeError("unreachable")
 
 
-def fetch_meta() -> list[dict]:
-    """Perp universe: name, szDecimals, maxLeverage, isDelisted flag."""
-    return _post({"type": "meta"}).json()["universe"]
+def fetch_meta(dex: str | None = None) -> list[dict]:
+    """Perp universe: name, szDecimals, maxLeverage, isDelisted flag.
+
+    `dex` selects a HIP-3 builder-deployed exchange (e.g. "xyz"); its market names
+    carry the prefix ("xyz:COPPER") and work as `coin` in the other calls.
+    """
+    payload = {"type": "meta"} if dex is None else {"type": "meta", "dex": dex}
+    return _post(payload).json()["universe"]
+
+
+def fetch_perp_dexs() -> list[str]:
+    """Names of the HIP-3 builder-deployed perp exchanges (the main dex is omitted)."""
+    return [d["name"] for d in _post({"type": "perpDexs"}).json() if d]
 
 
 def fetch_funding(coin: str, start: datetime, end: datetime) -> pd.DataFrame:

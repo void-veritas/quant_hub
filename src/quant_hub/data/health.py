@@ -5,14 +5,18 @@ r"""One-command health report of the raw data layer.
 
 Per (dataset, exchange, asset): first/last timestamp, rows, duplicate or unsorted
 timestamps, OHLCV sanity problems, gaps against the dataset's bar schedule, and
-staleness of the last bar. Exit code 1 when any problem is found, so it can gate
-a push to the bucket. Pre-listing synthetic HL daily bars (zero volume) and the
-known 2% of venue days missing from the HL L2 archive are reported, not hidden.
+staleness of the last bar. `--cross-venue` adds the HL vs Binance daily-close
+comparison (an asset whose closes disagree by more than 3% on over 10% of common
+days is not the same instrument on the two venues, e.g. FTT). Exit code 1 when any
+problem is found, so it can gate a push to the bucket. Pre-listing synthetic HL daily
+bars (zero volume) and the known 2% of venue days missing from the HL L2 archive are
+reported, not hidden.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from datetime import UTC, datetime
 
@@ -27,8 +31,12 @@ SCHEDULE = {
     "hl_l2_hour": "1D",
     "open_interest": "5min",
     "funding": None,  # hourly on HL, 8h/4h on Binance: inferred per asset
+    "futures_1d": None,  # exchange trading days: inferred (weekends/holidays are not gaps)
+    "cot_disagg": None,  # weekly (Tuesdays), with holiday shifts: inferred
 }
-OHLCV = {"ohlcv_15m", "ohlcv_1d"}
+OHLCV = {"ohlcv_15m", "ohlcv_1d", "futures_1d"}
+# datasets whose source is known to lack some days: flag only above this many missing
+KNOWN_MISSING_DAYS = {"hl_l2_hour": 30}  # the HL archive lacks ~25 venue days (2% of history)
 
 
 def _event_gaps(ts: pd.Series, tolerance: float = 2.5) -> pd.DataFrame:
@@ -156,8 +164,78 @@ def flag(df: pd.DataFrame, stale_days: float = 3.0) -> pd.DataFrame:
     if df.empty:
         return df
     live = df["status"].isin(["", "trading"])  # delisted instruments are stale by nature
-    bad = (df["problems"] != "") | (df["missing"] > 0) | ((df["stale_days"] > stale_days) & live)
+    tol = df["dataset"].map(KNOWN_MISSING_DAYS).fillna(0)
+    bad = (df["problems"] != "") | (df["missing"] > tol) | ((df["stale_days"] > stale_days) & live)
     return df[bad]
+
+
+def cross_venue(
+    root=None,
+    start: str | None = None,
+    threshold: float = 0.03,
+    max_share: float = 0.10,
+) -> pd.DataFrame:
+    """Daily closes of assets stored on both venues: share of days off by > `threshold`.
+
+    Returns one row per common asset (common_days, off_days, off_share, median_logdiff,
+    flagged) sorted by off_share. A flagged asset (off_share > `max_share`) must not
+    be stitched across venues: its canonical id maps to different instruments or one
+    venue's series is stale.
+    """
+    from quant_hub.data.loaders import load_ohlcv
+
+    root = root or storage.RAW_ROOT
+    frames = {}
+    for venue in ("hyperliquid", "binance"):
+        if not (root / "ohlcv_1d" / f"exchange={venue}").exists():
+            return pd.DataFrame(
+                columns=[
+                    "asset",
+                    "common_days",
+                    "off_days",
+                    "off_share",
+                    "median_logdiff",
+                    "flagged",
+                ]
+            )
+        df = (
+            load_ohlcv(None, start=start, exchange=venue, interval="1d")
+            if root == storage.RAW_ROOT
+            else _read_daily(root, venue, start)
+        )
+        frames[venue] = df[df["volume"] > 0][["ts", "asset", "close"]]
+    m = frames["hyperliquid"].merge(frames["binance"], on=["ts", "asset"], suffixes=("_hl", "_bn"))
+    if m.empty:
+        return pd.DataFrame(
+            columns=["asset", "common_days", "off_days", "off_share", "median_logdiff", "flagged"]
+        )
+    m["ldiff"] = (m["close_hl"] / m["close_bn"]).map(math.log)
+    g = m.groupby("asset")
+    out = pd.DataFrame(
+        {
+            "common_days": g.size(),
+            "off_days": g["ldiff"].apply(lambda s: int((s.abs() > threshold).sum())),
+            "median_logdiff": g["ldiff"].median().round(5),
+        }
+    )
+    out["off_share"] = (out["off_days"] / out["common_days"]).round(4)
+    out["flagged"] = out["off_share"] > max_share
+    return out.reset_index().sort_values("off_share", ascending=False).reset_index(drop=True)
+
+
+def _read_daily(root, venue: str, start: str | None) -> pd.DataFrame:
+    parts = storage.list_partitions("ohlcv_1d", root=root)
+    parts = parts[parts["exchange"] == venue]
+    frames = []
+    for _, p in parts.iterrows():
+        df = pd.read_parquet(p["path"])
+        df["asset"] = p["asset"]
+        frames.append(df)
+    df = pd.concat(frames, ignore_index=True)
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    if start:
+        df = df[df["ts"] >= pd.Timestamp(start, tz="UTC")]
+    return df
 
 
 def main(argv=None) -> int:
@@ -168,6 +246,11 @@ def main(argv=None) -> int:
     ap.add_argument("--assets", help="comma-separated canonical ids")
     ap.add_argument("--stale-days", type=float, default=3.0)
     ap.add_argument("--all", action="store_true", help="print every row, not only flagged ones")
+    ap.add_argument(
+        "--cross-venue",
+        action="store_true",
+        help="also compare HL and Binance daily closes per asset (ohlcv_1d on both venues)",
+    )
     args = ap.parse_args(argv)
     df = report(args.dataset, args.exchange, args.assets.split(",") if args.assets else None)
     bad = flag(df, args.stale_days)
@@ -188,7 +271,16 @@ def main(argv=None) -> int:
             f"{len(bad)} rows need attention (problems, gaps, or stale > {args.stale_days} days):"
         )
         print(bad.to_string(index=False))
-    return 1 if not bad.empty else 0
+    rc = 1 if not bad.empty else 0
+    if args.cross_venue:
+        cv = cross_venue()
+        print("\ncross-venue daily closes (HL vs Binance):")
+        print(cv[cv["flagged"] | (cv["off_days"] > 0)].to_string(index=False))
+        if cv["flagged"].any():
+            bad_assets = cv[cv["flagged"]]["asset"].tolist()
+            print(f"flagged (not the same instrument on both venues): {bad_assets}")
+            rc = 1
+    return rc
 
 
 if __name__ == "__main__":
