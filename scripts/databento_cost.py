@@ -52,6 +52,7 @@ PLAN = [
 
 
 def main() -> int:
+    """Print the cost and billable size of every planned request; download nothing."""
     if not os.environ.get("DATABENTO_API_KEY"):
         print("DATABENTO_API_KEY is not set", file=sys.stderr)
         return 2
