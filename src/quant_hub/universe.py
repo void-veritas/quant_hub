@@ -77,7 +77,7 @@ STABLECOINS = frozenset(
     "USDT USDC BUSD DAI TUSD USDP UST USTC USDE USDS FDUSD PYUSD USDD FRAX LUSD GUSD USDN "
     "HUSD SUSD "
     "EURS USDJ USDX USD1 RLUSD USD0 CUSD MIM DOLA USDY FEI USDL AUSD XAUT PAXG USDK USDQ EURC GHO "
-    "CRVUSD USDB BUIDL USDE2 USDS5 USDX3 EUROC".split()
+    "CRVUSD USDB BUIDL USDE2 USDS5 USDX3 EUROC USDG USDF BFUSD OUSD USTB USYC".split()
 )
 DUPLICATES = frozenset(
     "BTCD HBTC IBBTC RBTC SBTC3 WNXM WBTC WETH STETH WSTETH WBETH WEETH RETH CBBTC BTCB "
@@ -113,7 +113,8 @@ def cap_series(
     """
     m = mc[["Ticker", "Date", "MarketCapUSD"]].copy()
     m["Date"] = pd.to_datetime(m["Date"])
-    m = m[~m["Ticker"].isin(exclude)]
+    # CoinCodex disambiguates with numeric suffixes (USDE2, USDG4): exclude on the base ticker too
+    m = m[~m["Ticker"].isin(exclude) & ~m["Ticker"].str.rstrip("0123456789").isin(exclude)]
     m["asset"] = m["Ticker"].map(lambda t: normalise_ticker(t, known))
     wide = m.pivot_table(index="Date", columns="asset", values="MarketCapUSD", aggfunc="max")
     wide = wide.asfreq("D").ffill(limit=3)

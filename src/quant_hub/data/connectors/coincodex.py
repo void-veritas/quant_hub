@@ -59,25 +59,30 @@ def coin(symbol: str) -> dict | None:
     return j if isinstance(j, dict) and j.get("symbol") else None
 
 
-def daily_history(symbol: str, start: str, end: str) -> pd.DataFrame:
-    """Daily rows (Date, Price, Volume, MarketCapUSD) at 00:00 UTC of each day in [start, end].
+def daily_history(symbol: str, start: str, end: str, cutoff_hours: int = 8) -> pd.DataFrame:
+    """Daily rows (Date, Price, Volume, MarketCapUSD) for every day in [start, end].
 
-    The endpoint returns ``n`` roughly evenly spaced samples (not always on the hour); with
-    four per day the first sample of each day falls in its first hours. That first sample is
-    kept (stamped with the day): it is known before a 09:00 decision on the same day.
+    The endpoint returns at most ~600 samples per call, so long ranges come back every
+    ~12 h (up to 20 h apart) and not on the hour. The value of day ``d`` is the latest
+    sample at or before ``d`` + ``cutoff_hours`` (08:00 UTC): known before a 09:00 decision
+    on that day, and always present when samples are less than a day apart. The request
+    starts a day early so the first day has a sample before its cut-off.
     """
-    days = (pd.Timestamp(end) - pd.Timestamp(start)).days + 1
-    j = _get(f"/get_coin_history/{symbol}/{start}/{end}/{4 * days}")
+    s0 = (pd.Timestamp(start) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    days = (pd.Timestamp(end) - pd.Timestamp(s0)).days + 1
+    j = _get(f"/get_coin_history/{symbol}/{s0}/{end}/{min(4 * days, 600)}")
     rows = j.get(symbol) if isinstance(j, dict) else None
     cols = ["Date", "Price", "Volume", "MarketCapUSD"]
     if not rows:
         return pd.DataFrame(columns=cols)
     d = pd.DataFrame(rows, columns=["ts", "Price", "Volume", "MarketCapUSD"])
-    d["t"] = pd.to_datetime(d["ts"], unit="s", utc=True).dt.tz_localize(None)
-    d["Date"] = d["t"].dt.normalize()
-    d = (
-        d[d["t"] - d["Date"] < pd.Timedelta(hours=8)]
-        .sort_values("t")
-        .drop_duplicates("Date", keep="first")
+    d["t"] = (
+        pd.to_datetime(d["ts"], unit="s", utc=True).dt.tz_localize(None).astype("datetime64[ns]")
     )
-    return d[cols].sort_values("Date").reset_index(drop=True)
+    d = d.sort_values("t")
+    grid = pd.DataFrame({"Date": pd.date_range(start, end, freq="D").astype("datetime64[ns]")})
+    grid["cut"] = grid["Date"] + pd.Timedelta(hours=cutoff_hours)
+    out = pd.merge_asof(grid, d, left_on="cut", right_on="t", direction="backward")
+    # a sample older than a day before the cut-off is not today's value
+    out = out[out["t"].notna() & (out["cut"] - out["t"] <= pd.Timedelta(hours=32))]
+    return out[cols].reset_index(drop=True)
