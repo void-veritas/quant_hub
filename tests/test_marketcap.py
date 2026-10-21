@@ -11,10 +11,14 @@ def _cc(tmp_path):
     for d in pd.date_range("2026-01-20", "2026-01-22"):
         rows += [
             dict(
-                Ticker="BTC", Date=d.strftime("%Y-%m-%d"), Price=1.0, Volume=1.0, MarketCapUSD=100.0
+                Ticker="BTC", Date=d.strftime("%Y-%m-%d"), Price=9e4, Volume=1.0, MarketCapUSD=100.0
             ),
             dict(
-                Ticker="BONK2", Date=d.strftime("%Y-%m-%d"), Price=1.0, Volume=1.0, MarketCapUSD=5.0
+                Ticker="BONK2",
+                Date=d.strftime("%Y-%m-%d"),
+                Price=2e-5,
+                Volume=1.0,
+                MarketCapUSD=5.0,
             ),
         ]
     p = tmp_path / "cc.feather"
@@ -28,7 +32,7 @@ def test_splice_takes_coingecko_strictly_after_the_coincodex_end(tmp_path):
         {
             "Ticker": ["BTC", "BTC", "NEW"],
             "Date": pd.to_datetime(["2026-01-22", "2026-01-23", "2026-01-23"]),
-            "Price": 1.0,
+            "Price": [9e4, 9.1e4, 3.0],
             "Volume": 1.0,
             "MarketCapUSD": [999.0, 110.0, 7.0],
             "cg_id": ["bitcoin", "bitcoin", "new-coin"],
@@ -46,6 +50,32 @@ def test_splice_takes_coingecko_strictly_after_the_coincodex_end(tmp_path):
     )
     assert "NEW" in set(m["Ticker"])  # a coin listed after January enters
     assert m.duplicated(["Ticker", "Date"]).sum() == 0
+
+
+def test_usd_pegs_are_dropped_on_both_sources(tmp_path):
+    days = pd.date_range("2026-01-20", "2026-01-22").strftime("%Y-%m-%d")
+    rows = [
+        dict(Ticker=t, Date=d, Price=px, Volume=1.0, MarketCapUSD=50.0)
+        for d in days
+        for t, px in (("USDG4", 1.001), ("ETH", 3000.0))
+    ]
+    cc = tmp_path / "cc.feather"
+    pd.DataFrame(rows).to_feather(cc)
+    cg = pd.DataFrame(
+        {
+            "Ticker": ["USYC", "ETH"],
+            "Date": pd.to_datetime(["2026-01-23"] * 2),
+            "Price": [1.0, 3100.0],
+            "Volume": 1.0,
+            "MarketCapUSD": [9e9, 4e11],
+            "cg_id": ["hashnote-usyc", "ethereum"],
+            "kind": "history",
+        }
+    )
+    cgp = tmp_path / "cg.parquet"
+    cg.to_parquet(cgp)
+    m = mcap.load_marketcap(cc, cgp, tmp_path / "none.csv", tmp_path / "none_map.csv")
+    assert set(m["Ticker"]) == {"ETH"}
 
 
 def test_id_map_resolves_shared_symbols_by_cap():
