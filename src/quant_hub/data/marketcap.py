@@ -1,7 +1,11 @@
-r"""Daily market caps for the point-in-time universe: CoinCodex (RW) spliced with CoinGecko.
+r"""Daily market caps for the point-in-time universe: the RW CoinCodex snapshot, extended.
 
 The RW ``coincodex.marketcap`` snapshot stops at 2026-01-22 and is no longer updated.
-After its last date the caps come from CoinGecko (Demo API). One loader for every
+After its last date the caps come, by default, from CoinCodex's own public endpoints:
+the same source, so the same coin set and cap definitions on both sides of the seam
+(``source="coincodex"``). CoinGecko (Demo API) is kept as a cross-check and fallback
+(``source="coingecko"``); on the same dates its top 50 differs by ~12 names because it
+ranks many stablecoins and tokenized assets that CoinCodex does not. One loader for every
 consumer (production, shadow book, backtests):
 
     from quant_hub.data.marketcap import load_marketcap
@@ -9,6 +13,9 @@ consumer (production, shadow book, backtests):
 
 Maintenance CLI (needs COINGECKO_API_KEY):
 
+    python -m quant_hub.data.marketcap cx-candidates  # CoinCodex tickers to track beyond the RW 500
+    python -m quant_hub.data.marketcap cx-backfill    # CoinCodex daily history after the snapshot
+    python -m quant_hub.data.marketcap cx-snapshot    # last 3 days of the top 300 (daily job)
     python -m quant_hub.data.marketcap map        # ticker -> CoinGecko id map
     python -m quant_hub.data.marketcap backfill   # daily history of mapped coins (<= 365 days)
     python -m quant_hub.data.marketcap snapshot   # today's caps, top 500 (2 calls; daily job)
@@ -17,6 +24,8 @@ Maintenance CLI (needs COINGECKO_API_KEY):
 
 Files (data/external, synced to the bucket like the RW files):
     rw/coincodex_marketcap.feather          RW snapshot, read-only
+    coincodex/tickers.csv                   Ticker, coin_name, rank, how (RW 500 + newcomers)
+    coincodex/marketcap_daily.parquet       Ticker, Date, Price, Volume, MarketCapUSD
     coingecko/id_map.csv                    Ticker, cg_id, name, rule
     coingecko/marketcap_daily.parquet       Ticker, Date, Price, Volume, MarketCapUSD, cg_id, kind
     coingecko/excluded.csv                  cg_id, category (non-coins: pegs, tokenized, wrappers)
@@ -24,9 +33,11 @@ Files (data/external, synced to the bucket like the RW files):
 What is ranked must be the same kind of thing on both sides of the seam. CoinGecko lists
 many stablecoins and tokenized real-world assets that CoinCodex did not track (or that the
 universe's exclusion list does not name); left in, they push real coins out of the top N.
-``load_marketcap`` therefore drops (1) CoinGecko ids in non-coin categories, with the
-CoinCodex tickers mapped to them, and (2) on both sources any ticker that trades at
-1 USD +- 3% on 90% of its days (a USD peg, whatever its name).
+With ``exclude_non_coins=True`` the loader drops (1) CoinGecko ids in non-coin categories,
+with the CoinCodex tickers mapped to them, and (2) on both sources any ticker that trades
+at 1 USD +- 3% on 90% of its days (a USD peg, whatever its name). This is a change of the
+universe rule (RW ranks everything CoinCodex ranks, minus a fixed exclusion list), so it is
+off by default and evaluated as its own candidate.
 """
 
 from __future__ import annotations
@@ -46,6 +57,9 @@ CG_DIR = EXTERNAL / "coingecko"
 ID_MAP = CG_DIR / "id_map.csv"
 CG_DAILY = CG_DIR / "marketcap_daily.parquet"
 EXCLUDED = CG_DIR / "excluded.csv"
+CX_DIR = EXTERNAL / "coincodex"
+CX_TICKERS = CX_DIR / "tickers.csv"
+CX_DAILY = CX_DIR / "marketcap_daily.parquet"
 COLS = ["Ticker", "Date", "Price", "Volume", "MarketCapUSD"]
 # CoinGecko renamed Toncoin to GRAM (HL renamed TON to GRAM in July 2026); keep the CoinCodex
 # ticker so the series stays one asset across the seam (the universe maps TONCOIN -> TON)
@@ -101,29 +115,41 @@ def load_coincodex(path=COINCODEX) -> pd.DataFrame:
 
 
 def load_marketcap(
-    coincodex_path=COINCODEX, coingecko_path=CG_DAILY, excluded_path=EXCLUDED, id_map_path=ID_MAP
+    source: str = "coincodex",
+    exclude_non_coins: bool = False,
+    coincodex_path=COINCODEX,
+    extension_path=None,
+    excluded_path=EXCLUDED,
+    id_map_path=ID_MAP,
 ) -> pd.DataFrame:
-    """CoinCodex through its last date, CoinGecko strictly after it (no overlap, no rescaling).
+    """The RW snapshot through its last date, then ``source`` strictly after it.
 
-    Non-coins are dropped on both sides (module docstring): CoinGecko ids in
-    ``excluded.csv`` and the tickers mapped to them, and USD-pegged tickers.
+    ``source``: "coincodex" (default, same source as the snapshot) or "coingecko". No
+    overlap and no rescaling at the seam. ``exclude_non_coins`` see module docstring.
     """
     cc = load_coincodex(coincodex_path)
     cut = cc["Date"].max()
-    if coingecko_path.exists():
-        cg = pd.read_parquet(coingecko_path)
-        bad_ids = set(pd.read_csv(excluded_path)["cg_id"]) if excluded_path.exists() else set()
-        bad_tickers = set()
-        if bad_ids and id_map_path.exists():
-            idm = pd.read_csv(id_map_path)
-            bad_tickers = set(idm.loc[idm["cg_id"].isin(bad_ids), "Ticker"])
-        cg = cg[(cg["Date"] > cut) & ~cg["cg_id"].isin(bad_ids)].copy()
-        cg["Ticker"] = cg["Ticker"].replace(CG_ALIASES)
-        out = pd.concat([cc, cg[COLS].assign(source="coingecko")], ignore_index=True)
-        out = out[~out["Ticker"].isin(bad_tickers)]
+    path = extension_path or (CX_DAILY if source == "coincodex" else CG_DAILY)
+    bad_tickers: set[str] = set()
+    if path.exists():
+        ext = pd.read_parquet(path)
+        ext = ext[ext["Date"] > cut].copy()
+        if source == "coingecko":
+            bad_ids = set()
+            if exclude_non_coins and excluded_path.exists():
+                bad_ids = set(pd.read_csv(excluded_path)["cg_id"])
+            if bad_ids and id_map_path.exists():
+                idm = pd.read_csv(id_map_path)
+                bad_tickers = set(idm.loc[idm["cg_id"].isin(bad_ids), "Ticker"])
+            ext = ext[~ext["cg_id"].isin(bad_ids)]
+            ext["Ticker"] = ext["Ticker"].replace(CG_ALIASES)
+        elif source != "coincodex":
+            raise ValueError(f"unknown source {source!r}")
+        out = pd.concat([cc, ext[COLS].assign(source=source)], ignore_index=True)
     else:
         out = cc
-    out = out[~out["Ticker"].isin(usd_pegged(out))]
+    if exclude_non_coins:
+        out = out[~out["Ticker"].isin(bad_tickers | usd_pegged(out))]
     return out.sort_values(["Ticker", "Date"]).reset_index(drop=True)
 
 
@@ -279,6 +305,122 @@ def cmd_exclusions(_args) -> None:
     print(f"exclusions: {len(cats)} categories, {len(out)} coin ids")
 
 
+def _cx_save(new: pd.DataFrame) -> int:
+    CX_DIR.mkdir(parents=True, exist_ok=True)
+    if CX_DAILY.exists():
+        new = pd.concat([pd.read_parquet(CX_DAILY), new], ignore_index=True)
+        new = new.drop_duplicates(["Ticker", "Date"], keep="last")  # re-fetched days win
+    new = new.sort_values(["Ticker", "Date"]).reset_index(drop=True)
+    tmp = CX_DAILY.with_suffix(".parquet.tmp")
+    new.to_parquet(tmp, index=False)
+    tmp.replace(CX_DAILY)
+    return len(new)
+
+
+def _name_match(a: str | None, b: str | None) -> bool:
+    if not a or not b:
+        return False
+    na, nb = (" ".join(x.lower().replace("(", " ").replace(")", " ").split()) for x in (a, b))
+    return na in nb or nb in na or na.split()[0] == nb.split()[0]
+
+
+def cmd_cx_candidates(args) -> None:
+    """Tickers to track: the RW snapshot's 500 plus confirmed newcomers.
+
+    CoinCodex's coin list endpoint is unreliable, so newcomers are probed: every HL symbol
+    and every CoinGecko top-300 ticker that the snapshot does not know. A probe tries the
+    symbol and its numbered variants (CoinCodex disambiguates with suffixes, e.g. HYPE8);
+    a hit needs a market-cap rank <= ``--max-rank`` and, when CoinGecko has a name for the
+    ticker, a matching coin name.
+    """
+    from quant_hub.data.connectors import coincodex as cx
+    from quant_hub.data.instruments import load_instruments
+
+    cc = load_coincodex()
+    rw_t = set(cc["Ticker"])
+    known = rw_t | {t.rstrip("0123456789") for t in rw_t}
+    names = {}
+    if ID_MAP.exists():
+        idm = pd.read_csv(ID_MAP)
+        names = dict(zip(idm["Ticker"], idm["name"], strict=True))
+    cands = set(load_instruments(exchange="hyperliquid")["canonical_id"]) - known
+    if CG_DAILY.exists():
+        cg = pd.read_parquet(CG_DAILY)
+        last = cg[cg["Date"] == cg["Date"].max()].sort_values("MarketCapUSD", ascending=False)
+        cands |= set(last.head(300)["Ticker"]) - known
+    rows = [dict(Ticker=t, coin_name="", rank=None, how="rw snapshot") for t in sorted(rw_t)]
+    for t in sorted(c for c in cands if c.isascii() and c.isalnum()):
+        hit = None
+        for sym in [t] + [f"{t}{i}" for i in range(2, 10)]:
+            meta = cx.coin(sym)
+            if meta is None:
+                if sym != t:
+                    break  # numbered variants are consecutive
+                continue
+            rank = meta.get("market_cap_rank")
+            if (
+                rank
+                and rank <= args.max_rank
+                and (t not in names or _name_match(meta.get("coin_name"), names[t]))
+            ):
+                hit = dict(
+                    Ticker=sym, coin_name=meta.get("coin_name"), rank=rank, how=f"newcomer ({t})"
+                )
+                break
+        if hit:
+            rows.append(hit)
+    out = pd.DataFrame(rows)
+    CX_DIR.mkdir(parents=True, exist_ok=True)
+    out.to_csv(CX_TICKERS, index=False)
+    new = out[out["how"] != "rw snapshot"]
+    print(
+        f"cx-candidates: {len(cands)} probed, {len(new)} newcomers kept: "
+        f"{new['Ticker'].tolist()[:40]}"
+    )
+
+
+def cmd_cx_backfill(args) -> None:
+    """Daily CoinCodex history from the day after the snapshot to today for every tracked ticker."""
+    from quant_hub.data.connectors import coincodex as cx
+
+    tickers = pd.read_csv(CX_TICKERS)["Ticker"].tolist()
+    start = (load_coincodex()["Date"].max() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    end = args.end or datetime.now(UTC).strftime("%Y-%m-%d")
+    frames, empty, failed = [], [], []
+    for i, t in enumerate(tickers, 1):
+        try:
+            h = cx.daily_history(t, start, end)
+        except Exception as e:  # noqa: BLE001 - keep going, report at the end
+            failed.append(f"{t}: {str(e)[:60]}")
+            continue
+        if h.empty:
+            empty.append(t)
+        else:
+            frames.append(h.assign(Ticker=t))
+        if i % 50 == 0:
+            print(f"cx-backfill: {i}/{len(tickers)}", flush=True)
+    n = _cx_save(pd.concat(frames, ignore_index=True)) if frames else 0
+    print(
+        f"cx-backfill {start} -> {end}: {len(frames)} tickers, file rows {n}; "
+        f"no data {len(empty)}: {empty[:15]}; failed {len(failed)}: {failed[:5]}"
+    )
+
+
+def cmd_cx_snapshot(args) -> None:
+    """Re-fetch the last 3 days for the top ``--top`` tickers by latest cap (daily job)."""
+    from quant_hub.data.connectors import coincodex as cx
+
+    m = load_marketcap()
+    last = m[m["Date"] == m["Date"].max()].sort_values("MarketCapUSD", ascending=False)
+    tracked = set(pd.read_csv(CX_TICKERS)["Ticker"]) if CX_TICKERS.exists() else set()
+    tickers = [t for t in last["Ticker"] if t in tracked][: args.top]
+    today = datetime.now(UTC).date()
+    start = (pd.Timestamp(today) - pd.Timedelta(days=3)).strftime("%Y-%m-%d")
+    frames = [cx.daily_history(t, start, today.isoformat()).assign(Ticker=t) for t in tickers]
+    n = _cx_save(pd.concat(frames, ignore_index=True)) if frames else 0
+    print(f"cx-snapshot {start} -> {today}: {len(tickers)} tickers, file rows {n}")
+
+
 def cmd_check(args) -> None:
     """Print the overlap statistics against CoinCodex and the flagged tickers."""
     cc = load_coincodex()
@@ -301,6 +443,12 @@ def main(argv=None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
+    cxc = sub.add_parser("cx-candidates")
+    cxc.add_argument("--max-rank", type=int, default=500)
+    cxb = sub.add_parser("cx-backfill")
+    cxb.add_argument("--end", help="YYYY-MM-DD (default today UTC)")
+    cxs = sub.add_parser("cx-snapshot")
+    cxs.add_argument("--top", type=int, default=300)
     sub.add_parser("map")
     b = sub.add_parser("backfill")
     b.add_argument("--days", type=int, default=365)
@@ -310,6 +458,9 @@ def main(argv=None) -> int:
     c.add_argument("--tol", type=float, default=0.2)
     args = ap.parse_args(argv)
     cmds = {
+        "cx-candidates": cmd_cx_candidates,
+        "cx-backfill": cmd_cx_backfill,
+        "cx-snapshot": cmd_cx_snapshot,
         "map": cmd_map,
         "backfill": cmd_backfill,
         "snapshot": cmd_snapshot,

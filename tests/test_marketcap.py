@@ -41,7 +41,7 @@ def test_splice_takes_coingecko_strictly_after_the_coincodex_end(tmp_path):
     )
     cgp = tmp_path / "cg.parquet"
     cg.to_parquet(cgp)
-    m = mcap.load_marketcap(cc, cgp)
+    m = mcap.load_marketcap("coingecko", coincodex_path=cc, extension_path=cgp)
     btc = m[m["Ticker"] == "BTC"].set_index("Date")
     assert btc.loc["2026-01-22", "MarketCapUSD"] == 100.0  # CoinCodex wins on its own dates
     assert (
@@ -74,8 +74,37 @@ def test_usd_pegs_are_dropped_on_both_sources(tmp_path):
     )
     cgp = tmp_path / "cg.parquet"
     cg.to_parquet(cgp)
-    m = mcap.load_marketcap(cc, cgp, tmp_path / "none.csv", tmp_path / "none_map.csv")
-    assert set(m["Ticker"]) == {"ETH"}
+    kw = dict(
+        coincodex_path=cc,
+        extension_path=cgp,
+        excluded_path=tmp_path / "x.csv",
+        id_map_path=tmp_path / "y.csv",
+    )
+    assert set(mcap.load_marketcap("coingecko", **kw)["Ticker"]) == {
+        "USDG4",
+        "ETH",
+        "USYC",
+    }  # RW rule: off
+    assert set(mcap.load_marketcap("coingecko", exclude_non_coins=True, **kw)["Ticker"]) == {"ETH"}
+
+
+def test_default_extension_is_coincodex(tmp_path):
+    cc = _cc(tmp_path)
+    ext = pd.DataFrame(
+        {
+            "Ticker": ["BTC", "BONK2", "BTC"],
+            "Date": pd.to_datetime(["2026-01-23", "2026-01-23", "2026-01-22"]),
+            "Price": [9.1e4, 2.1e-5, 1.0],
+            "Volume": 1.0,
+            "MarketCapUSD": [101.0, 5.5, 999.0],
+        }
+    )
+    p = tmp_path / "cx.parquet"
+    ext.to_parquet(p)
+    m = mcap.load_marketcap(coincodex_path=cc, extension_path=p)
+    btc = m[m["Ticker"] == "BTC"].set_index("Date")["MarketCapUSD"]
+    assert btc["2026-01-22"] == 100.0 and btc["2026-01-23"] == 101.0
+    assert set(m.loc[m["Date"] == "2026-01-23", "source"]) == {"coincodex"}
 
 
 def test_id_map_resolves_shared_symbols_by_cap():
