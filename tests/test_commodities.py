@@ -115,13 +115,17 @@ class _FakeClient:
 
 
 def test_databento_refuses_above_the_limit_without_downloading(tmp_path):
-    cli = _FakeClient(usd=1.75)
+    cli = _FakeClient(usd=1.745)
     req = dbn.request(["HG.FUT"], "ohlcv-1d", "2010-06-06", "2026-10-21")
     est = dbn.estimate(req, cli)
-    assert est.usd == 1.75 and est.mb == 10.0
-    with pytest.raises(dbn.CostLimitExceeded, match="1.75 USD"):
+    assert est.usd == 1.745 and est.mb == 10.0
+    with pytest.raises(dbn.CostLimitExceeded, match="1.7450 USD"):
         dbn.fetch(req, max_usd=1.74, cli=cli, store_dir=tmp_path)
     assert cli.timeseries.calls == [] and not list(tmp_path.iterdir())
+    # sub-cent excess is not an excess: Databento bills in cents
+    cli = _FakeClient(usd=1.7412)
+    dbn.fetch(req, max_usd=1.74, cli=cli, store_dir=tmp_path)
+    assert len(cli.timeseries.calls) == 1
 
 
 def test_databento_fetch_keeps_the_file_and_a_sidecar(tmp_path):

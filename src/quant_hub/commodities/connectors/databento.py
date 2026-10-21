@@ -117,13 +117,14 @@ def fetch(
     """Buy `req` only if its estimate is at most `max_usd`; keep the DBN file and a sidecar.
 
     Returns `(DBNStore, path)`. Raises `CostLimitExceeded` before any paid call when
-    the estimate is above the limit. The sidecar `<stem>.json` records what was bought.
+    the estimate, rounded to the cent (what Databento bills), is above the limit.
+    The sidecar `<stem>.json` records what was bought.
     """
     cli = cli or client()
     est = estimate(req, cli)
-    if est.usd > max_usd:
+    if round(est.usd, 2) > round(max_usd, 2):  # Databento bills in cents; compare at that precision
         raise CostLimitExceeded(
-            f"estimate {est.usd:.2f} USD ({est.mb:.1f} MB) exceeds the limit {max_usd:.2f} USD; "
+            f"estimate {est.usd:.4f} USD ({est.mb:.1f} MB) exceeds the limit {max_usd:.2f} USD; "
             "nothing downloaded"
         )
     store_dir = store_dir or storage.layer_path("raw", "databento").parent / "databento"
