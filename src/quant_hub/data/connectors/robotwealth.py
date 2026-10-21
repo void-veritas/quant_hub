@@ -17,6 +17,7 @@ Endpoints used:
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 
@@ -34,6 +35,26 @@ def _key() -> str:
     return key
 
 
+_SECRET_QS = re.compile(r"(api_key|signature|Signature|X-Amz-Signature|token)=[^&\s'\"]+")
+
+
+def redact(text: str) -> str:
+    """Remove credentials and URL signatures from a message (errors end up in logs)."""
+    return _SECRET_QS.sub(r"\1=***", text)
+
+
+class RobotWealthError(RuntimeError):
+    """An HTTP error from the RW API or CDN, with credentials removed from the message."""
+
+
+def _raise_for_status(resp: httpx.Response) -> None:
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as err:
+        # the request URL carries api_key: re-raise without it and without the chained original
+        raise RobotWealthError(redact(str(err))) from None
+
+
 def _get(path: str, params: dict | None = None, retries: int = 4) -> dict:
     params = {"api_key": _key(), **(params or {})}
     for attempt in range(retries):
@@ -41,7 +62,7 @@ def _get(path: str, params: dict | None = None, retries: int = 4) -> dict:
         if resp.status_code == 429 and attempt < retries - 1:
             time.sleep(15 * (attempt + 1))
             continue
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return resp.json()
     raise RuntimeError("unreachable")
 
@@ -84,7 +105,7 @@ def download_dataset(dataset: str, schema: str, dest: Path, namespace: str = "cr
         raise RuntimeError(f"no url in response: {list(out)}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     with _client.stream("GET", url) as r:
-        r.raise_for_status()
+        _raise_for_status(r)
         with open(dest, "wb") as f:
             for chunk in r.iter_bytes(1 << 20):
                 f.write(chunk)
