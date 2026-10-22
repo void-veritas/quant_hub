@@ -14,7 +14,9 @@ sanity, gaps, staleness) over `data/commodities/raw`, with rules that fit the do
   across all its contracts), because an expired contract is not a stale feed; calendar
   spreads (`HGZ6-HGH7`) legitimately trade at negative prices;
 - `futures_cont_1d`, `cot_disagg`: weekends and holidays are not gaps; staleness
-  thresholds are 5 and 14 days (COT is weekly and published with a 3-day lag).
+  thresholds are 5 and 14 days (COT is weekly and published with a 3-day lag); COT
+  staleness is judged on the newest market (hundreds of CFTC markets are dead), and
+  Yahoo's OHLC glitches are reported but not flagged (cross-check data only).
 
 Exit code 1 when any row is flagged, so it can gate `commodities.sync push`.
 """
@@ -38,6 +40,10 @@ STALE_DAYS = {
     "cot_disagg": 14.0,
 }
 GAPS_FLAGGED = {"ohlcv_1d", "funding"}  # the others are sparse or on trading days
+# cross-check sources with known OHLC glitches (Yahoo): sanity problems are reported, not flagged
+SANITY_INFORMATIONAL = {"futures_cont_1d"}
+# datasets whose staleness is judged on the newest row only (expired contracts, dead CFTC markets)
+STALE_BY_NEWEST = {"futures_1d", "cot_disagg"}
 COLUMNS = [
     "dataset",
     "exchange",
@@ -87,7 +93,7 @@ def report(
     spread = (df["dataset"] == "futures_1d") & df["asset"].map(is_spread)
     df.loc[spread, "problems"] = df.loc[spread, "problems"].map(_drop_sign_problems)
     df["status"] = [
-        status.get((ex, a), "contract" if ds == "futures_1d" else "")
+        status.get((ex, a), {"futures_1d": "contract", "cot_disagg": "market"}.get(ds, ""))
         for ds, ex, a in zip(df["dataset"], df["exchange"], df["asset"], strict=True)
     ]
     return df

@@ -256,6 +256,8 @@ def test_health_rules_of_the_domain(croot):
     assert not any(d == "futures_1d" for d, _ in flagged)  # root HG is fresh; negative spread ok
     assert df.set_index("asset").loc["HGZ6-HGH7", "problems"] == ""
     assert ("cot_disagg", "085692") not in flagged
+    assert ("cot_disagg", "967654") not in flagged  # dead market: not a stale feed
+    assert st[("cot_disagg", "967654")] == "market"
     # when every contract of the root goes quiet, exactly the newest one is flagged
     late = health.report(now=now + pd.Timedelta(days=10))
     fut = health.flag(late)
@@ -469,3 +471,27 @@ def test_curated_roll_by_volume_with_hysteresis_and_returns():
     # Z6 drops out of the front at its guard even if still loud; after its last bar its price is NaN
     close = curated.engine_inputs(bars)
     assert close["HGZ2026"].isna().iloc[-1] and close["HGH2027"].notna().all()
+
+
+def test_westmetall_parse_skips_repeated_headers():
+    from quant_hub.commodities.connectors import westmetall
+
+    html = (
+        "<table><tr><th>date</th><th>LME Copper Cash-Settlement</th><th>LME Copper 3-month</th>"
+        "<th>LME Copper stock</th></tr>"
+        "<tr><td>21. October 2026</td><td>14441.00</td><td>14315.00</td><td>245275</td></tr>"
+        "<tr><td>date</td><td>LME Copper Cash-Settlement</td><td>LME Copper 3-month</td>"
+        "<td>LME Copper stock</td></tr>"
+        "<tr><td>20. October 2026</td><td>14,540.00</td><td>14357.00</td><td>233800</td></tr>"
+        "</table>"
+    )
+    df = westmetall.parse(html)
+    assert list(df.columns) == westmetall.COLUMNS and len(df) == 2
+    assert (
+        df["ts"].iloc[0] == pd.Timestamp("2026-10-20", tz="UTC") and df["cash"].iloc[0] == 14540.0
+    )
+    assert df["stock"].iloc[1] == 245275
+    with pytest.raises(ValueError, match="unexpected Westmetall"):
+        westmetall.parse(
+            "<table><tr><th>a</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table>"
+        )

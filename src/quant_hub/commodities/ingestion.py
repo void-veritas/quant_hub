@@ -4,6 +4,8 @@ r"""Backfill CLI of the commodities domain. Manual, idempotent, resume-safe.
     uv run python -m quant_hub.commodities.ingestion databento --symbols HG.FUT --schema ohlcv-1d \\
         --start 2010-06-06 [--end YYYY-MM-DD] --max-usd 1.74 [--estimate-only]
     uv run python -m quant_hub.commodities.ingestion databento-file --file raw/databento/<f>.dbn.zst
+    uv run python -m quant_hub.commodities.ingestion lme       [--metals CU,AL] [--first-year 2008]
+    uv run python -m quant_hub.commodities.ingestion yahoo     --macro | --symbols DXY=DX-Y.NYB
     uv run python -m quant_hub.commodities.ingestion cot       [--start-year 2006] [--codes 085692]
     uv run python -m quant_hub.commodities.ingestion futures   --assets HG,GC [--source yahoo|stooq]
 
@@ -21,7 +23,7 @@ from pathlib import Path
 import pandas as pd
 
 from quant_hub.commodities import hip3, storage
-from quant_hub.commodities.connectors import cftc, futures_daily
+from quant_hub.commodities.connectors import cftc, futures_daily, westmetall
 from quant_hub.commodities.connectors import databento as dbn
 
 
@@ -69,6 +71,41 @@ def cmd_databento_file(args) -> None:
     bars = dbn.bars_to_frame(dbn.read_file(path))
     n = dbn.write_bars(bars, dataset=args.dataset)
     print(f"{path.name}: {n} rows, {bars['symbol'].nunique()} raw symbols -> {args.dataset}")
+
+
+YAHOO_MACRO = {  # path-safe asset id -> Yahoo symbol; daily closes for macro factor candidates
+    "DXY": "DX-Y.NYB",
+    "TNX": "^TNX",
+    "GOLD": "GC=F",
+    "SSEC": "000001.SS",
+    "USDCNY": "CNY=X",
+    "SPX": "^GSPC",
+}
+LME_METALS = {"CU": "LME_Cu_cash", "AL": "LME_Al_cash", "NI": "LME_Ni_cash", "ZN": "LME_Zn_cash"}
+
+
+def cmd_yahoo(args) -> None:
+    """Daily closes of arbitrary Yahoo symbols (macro candidates) into `yahoo_1d`."""
+    pairs = YAHOO_MACRO if args.macro else dict(kv.split("=", 1) for kv in args.symbols.split(","))
+    for asset, symbol in pairs.items():
+        df = futures_daily.fetch_yahoo(symbol, start=args.start or "1990-01-01")
+        if not df.empty:
+            storage.write_partition(df, "yahoo_1d", "yahoo", asset)
+        span = f"{df['ts'].min().date()} -> {df['ts'].max().date()}" if len(df) else "-"
+        print(f"yahoo {asset:8s} {symbol:12s} {len(df)} rows {span}", flush=True)
+        time.sleep(1.0)
+
+
+def cmd_lme(args) -> None:
+    """LME cash, 3-month and stocks per metal from Westmetall into `lme_daily` (exchange=lme)."""
+    for asset in [a.strip().upper() for a in args.metals.split(",")]:
+        field = LME_METALS[asset]
+        df = westmetall.fetch(field, first=args.first_year)
+        storage.write_partition(df, "lme_daily", "lme", asset)
+        print(
+            f"lme {asset} {len(df)} days {df['ts'].min().date()} -> {df['ts'].max().date()}",
+            flush=True,
+        )
 
 
 def cmd_cot(args) -> None:
@@ -135,6 +172,16 @@ def main(argv=None) -> None:
     p.add_argument("--file", required=True, help="path of the .dbn.zst under raw/databento/")
     p.add_argument("--dataset", default="futures_1d")
 
+    p = sub.add_parser("yahoo", help="daily closes of Yahoo symbols (macro candidates) -> yahoo_1d")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--symbols", help="ASSET=YAHOO pairs, comma-separated, e.g. DXY=DX-Y.NYB")
+    g.add_argument("--macro", action="store_true", help="the built-in macro set")
+    p.add_argument("--start")
+
+    p = sub.add_parser("lme", help="LME cash / 3M / stocks from Westmetall -> lme_daily")
+    p.add_argument("--metals", default="CU", help=f"comma-separated, from {sorted(LME_METALS)}")
+    p.add_argument("--first-year", type=int, default=westmetall.FIRST_YEAR)
+
     p = sub.add_parser("cot", help="CFTC disaggregated Commitments of Traders (weekly, 2006+)")
     p.add_argument("--start-year", type=int, default=cftc.FIRST_YEAR)
     p.add_argument("--end-year", type=int)
@@ -155,6 +202,8 @@ def main(argv=None) -> None:
         "databento-file": cmd_databento_file,
         "cot": cmd_cot,
         "futures": cmd_futures,
+        "yahoo": cmd_yahoo,
+        "lme": cmd_lme,
     }[args.command](args)
 
 
