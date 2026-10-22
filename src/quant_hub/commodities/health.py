@@ -104,18 +104,23 @@ def flag(df: pd.DataFrame, stale_days: float | None = None) -> pd.DataFrame:
     if df.empty:
         return df
     limit = df["dataset"].map(STALE_DAYS).fillna(3.0) if stale_days is None else stale_days
-    bad = df["problems"] != ""
+    bad = (df["problems"] != "") & ~df["dataset"].isin(SANITY_INFORMATIONAL)
     # a zero-volume day of an illiquid perp is stored (synthetic row), not missing
     bad |= (df["missing"] > df["synthetic_rows"]) & df["dataset"].isin(GAPS_FLAGGED)
-    live = ~df["status"].isin(["delisted", "contract"])
+    live = ~df["status"].isin(["delisted", "contract", "market"])
     bad |= (df["stale_days"] > limit) & live
-    # futures: staleness per product root, attached to that root's newest contract
-    fut = df["dataset"] == "futures_1d"
-    if fut.any():
-        roots = df.loc[fut, "asset"].map(lambda a: root_of(a) or a)
-        newest = df.loc[fut, "stale_days"].groupby(roots).transform("min")
-        lim = limit if isinstance(limit, int | float) else limit[fut]
-        bad.loc[fut] |= (newest > lim) & (df.loc[fut, "stale_days"] == newest)
+    # futures and COT: staleness per product root (or per dataset), attached to the newest row
+    for ds in STALE_BY_NEWEST:
+        sel = df["dataset"] == ds
+        if not sel.any():
+            continue
+        if ds == "futures_1d":
+            groups = df.loc[sel, "asset"].map(lambda a: root_of(a) or a)
+        else:
+            groups = pd.Series(ds, index=df.index[sel])
+        newest = df.loc[sel, "stale_days"].groupby(groups).transform("min")
+        lim = limit if isinstance(limit, int | float) else limit[sel]
+        bad.loc[sel] |= (newest > lim) & (df.loc[sel, "stale_days"] == newest)
     return df[bad]
 
 
