@@ -3,6 +3,7 @@ r"""Backfill CLI of the commodities domain. Manual, idempotent, resume-safe.
     uv run python -m quant_hub.commodities.ingestion hip3      [--dexes xyz,flx] [--all-markets]
     uv run python -m quant_hub.commodities.ingestion databento --symbols HG.FUT --schema ohlcv-1d \\
         --start 2010-06-06 [--end YYYY-MM-DD] --max-usd 1.74 [--estimate-only]
+    uv run python -m quant_hub.commodities.ingestion databento-file --file raw/databento/<f>.dbn.zst
     uv run python -m quant_hub.commodities.ingestion cot       [--start-year 2006] [--codes 085692]
     uv run python -m quant_hub.commodities.ingestion futures   --assets HG,GC [--source yahoo|stooq]
 
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
 
 import pandas as pd
 
@@ -59,6 +61,14 @@ def cmd_databento(args) -> None:
             f"({int((~spreads).sum())} outright rows, {int(spreads.sum())} spread rows), "
             f"{bars['ts'].min().date()} -> {bars['ts'].max().date()}"
         )
+
+
+def cmd_databento_file(args) -> None:
+    """Lay out (again) the bars of a DBN file bought earlier; no network, no cost."""
+    path = Path(args.file)
+    bars = dbn.bars_to_frame(dbn.read_file(path))
+    n = dbn.write_bars(bars, dataset=args.dataset)
+    print(f"{path.name}: {n} rows, {bars['symbol'].nunique()} raw symbols -> {args.dataset}")
 
 
 def cmd_cot(args) -> None:
@@ -121,6 +131,10 @@ def main(argv=None) -> None:
     p.add_argument("--max-usd", type=float, required=True, help="refuse above this estimate")
     p.add_argument("--estimate-only", action="store_true", help="print the estimate and exit")
 
+    p = sub.add_parser("databento-file", help="re-lay out a stored DBN file (no purchase)")
+    p.add_argument("--file", required=True, help="path of the .dbn.zst under raw/databento/")
+    p.add_argument("--dataset", default="futures_1d")
+
     p = sub.add_parser("cot", help="CFTC disaggregated Commitments of Traders (weekly, 2006+)")
     p.add_argument("--start-year", type=int, default=cftc.FIRST_YEAR)
     p.add_argument("--end-year", type=int)
@@ -135,9 +149,13 @@ def main(argv=None) -> None:
     p.add_argument("--end", help="YYYY-MM-DD (yahoo only)")
 
     args = ap.parse_args(argv)
-    {"hip3": cmd_hip3, "databento": cmd_databento, "cot": cmd_cot, "futures": cmd_futures}[
-        args.command
-    ](args)
+    {
+        "hip3": cmd_hip3,
+        "databento": cmd_databento,
+        "databento-file": cmd_databento_file,
+        "cot": cmd_cot,
+        "futures": cmd_futures,
+    }[args.command](args)
 
 
 if __name__ == "__main__":

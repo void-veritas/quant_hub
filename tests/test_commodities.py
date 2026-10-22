@@ -4,11 +4,12 @@ import io
 import json
 import zipfile
 
+import numpy as np
 import pandas as pd
 import pytest
 from tests.test_data_layer import _FakeS3
 
-from quant_hub.commodities import health, hip3, migrate, storage
+from quant_hub.commodities import curated, health, hip3, migrate, storage
 from quant_hub.commodities.connectors import cftc, futures_daily
 from quant_hub.commodities.connectors import databento as dbn
 
@@ -141,22 +142,35 @@ def test_databento_fetch_keeps_the_file_and_a_sidecar(tmp_path):
     assert dbn.dataset_end(cli=cli) == "2026-10-21"
 
 
-def test_databento_bars_per_contract(croot):
-    df = _bars("HGZ6", "2026-01-01", 2).drop(columns="symbol")
-    df["symbol"] = ["HGZ6", "HGH7-HGZ6"]
-    df["instrument_id"] = [1, 2]
+def test_databento_bars_per_contract_with_unambiguous_ids(croot):
+    # the raw symbol HGZ5 is two instruments ten years apart; the spread resolves leg by leg
+    a = _bars("HGZ5", "2015-06-01", 2).assign(instrument_id=199046)
+    b = _bars("HGZ5", "2025-06-01", 2).assign(instrument_id=6572)
+    c = _bars("HGZ6-HGH7", "2026-01-01", 2).assign(instrument_id=3)
+    df = pd.concat([a, b, c], ignore_index=True)
     bars = dbn.bars_to_frame(df.rename(columns={"ts": "ts_event"}).set_index("ts_event"))
     assert list(bars.columns) == dbn.BARS and bars["ts"].dt.tz is not None
-    assert dbn.write_bars(bars) == 2
+    assert dbn.write_bars(bars) == 6
     parts = storage.list_partitions("futures_1d")
-    assert sorted(parts["asset"]) == ["HGH7-HGZ6", "HGZ6"] and set(parts["exchange"]) == {"cme"}
+    assert sorted(set(parts["asset"])) == ["HGZ2015", "HGZ2025", "HGZ2026-HGH2027"]
+    assert set(parts["exchange"]) == {"cme"}
+    stored = pd.read_parquet(parts[parts["asset"] == "HGZ2025"]["path"].iloc[0])
+    assert set(stored["symbol"]) == {"HGZ5"}
 
 
 def test_databento_symbol_helpers():
-    assert dbn.root_of("HGZ6") == "HG" and dbn.root_of("HGZ26") == "HG"
-    assert dbn.root_of("HGZ6-HGH7") == "HG" and dbn.is_spread("HGZ6-HGH7")
-    assert dbn.root_of("ZSX6") == "ZS" and dbn.expiry_code("ZSX6") == "X6"
+    assert dbn.root_of("HGZ6") == "HG" and dbn.root_of("HGZ2026") == "HG"
+    assert dbn.root_of("HGZ2026-HGH2027") == "HG" and dbn.is_spread("HGZ6-HGH7")
+    assert dbn.root_of("ZSX6") == "ZS" and dbn.expiry_code("ZSX2026") == "X2026"
     assert dbn.expiry_code("HGZ6-HGH7") is None and dbn.root_of("HG.FUT") is None
+    assert dbn.resolve_year("M0", "2010-06-06") == 2010
+    assert dbn.resolve_year("F0", "2018-06-29") == 2020
+    assert (
+        dbn.resolve_year("Z5", "2011-01-31") == 2015
+        and dbn.resolve_year("Z5", "2023-12-22") == 2025
+    )
+    assert dbn.contract_id("HGZ6-HGH7", "2024-05-01") == "HGZ2026-HGH2027"
+    assert dbn.contract_id("HG.FUT", "2024-05-01") == "HG.FUT"
 
 
 # --- HIP-3 -----------------------------------------------------------------------
@@ -389,3 +403,69 @@ def test_free_futures_parsers():
     assert len(futures_daily.parse_stooq(text, "hg.f")) == 1
     with pytest.raises(ValueError, match="no CSV"):
         futures_daily.parse_stooq("Exceeded the daily hits limit", "hg.f")
+
+
+# --- curated copper layer ------------------------------------------------------
+
+
+def _contract(symbol, start, n, price, vol):
+    ts = pd.bdate_range(start, periods=n, tz="UTC")
+    p = np.linspace(price, price * 1.02, n)
+    return pd.DataFrame(
+        dict(asset=symbol, ts=ts, open=p, high=p * 1.01, low=p * 0.99, close=p, volume=float(vol))
+    )
+
+
+def test_curated_calendar_and_expiry():
+    assert curated.resolve_expiry_month("HGM0", pd.Timestamp("2010-06-06")) == pd.Timestamp(
+        "2010-06-01"
+    )
+    assert curated.resolve_expiry_month("HGZ2026", pd.Timestamp("2024-03-01")) == pd.Timestamp(
+        "2026-12-01"
+    )
+    assert curated._third_last_business_day(2026, 12) == pd.Timestamp("2026-12-29")
+    with pytest.raises(ValueError, match="not an outright"):
+        curated.resolve_expiry_month("HGZ6-HGH7", pd.Timestamp("2026-01-01"))
+
+
+def test_curated_roll_by_volume_with_hysteresis_and_returns():
+    # Z6 is front until H7's volume takes over; H7 then stays front even when Z6 is louder
+    z6 = _contract("HGZ2026", "2026-10-01", 40, 6.6, 100)
+    z6.loc[z6.index[30:], "volume"] = 20.0
+    z6.loc[z6.index[36:], "volume"] = 500.0  # noise after the roll: must not roll back
+    h7 = _contract("HGH2027", "2026-10-01", 60, 6.7, 10)
+    h7.loc[h7.index[30:], "volume"] = 200.0
+    k7 = _contract("HGK2027", "2026-10-01", 60, 6.8, 20)
+    j7 = _contract("HGJ2027", "2026-10-01", 60, 6.75, 0.5)  # thin serial month: never the second
+    sunday = pd.DataFrame(
+        dict(
+            asset="HGZ2026",
+            ts=[pd.Timestamp("2026-10-04", tz="UTC")],
+            open=1,
+            high=1,
+            low=1,
+            close=1,
+            volume=1.0,
+        )
+    )
+    bars = pd.concat([z6, h7, k7, j7, sunday], ignore_index=True)
+    curve, table = curated.build_curve(bars)
+    assert list(table.index) == ["HGZ2026", "HGH2027", "HGJ2027", "HGK2027"]
+    assert curve.index.dayofweek.max() < 5  # the Sunday bar is gone
+    assert curve["front"].iloc[0] == "HGZ2026" and curve["second"].iloc[0] == "HGH2027"
+    assert curve["front"].iloc[-1] == "HGH2027" and curve["second"].iloc[-1] == "HGK2027"
+    rolls = curve.index[curve["roll"]]
+    assert len(rolls) == 1
+    # on the roll day the return is still earned on Z6 (held from t-1)
+    r = curve.loc[rolls[0]]
+    i = z6.index[z6["ts"] == rolls[0]][0]
+    assert r["ret_front"] == pytest.approx(z6["close"].iloc[i] / z6["close"].iloc[i - 1] - 1)
+    # carry: Z6 cheaper than H7 -> contango -> negative carry; days to second ~ 3 months
+    first = curve.iloc[0]
+    assert first["carry_ann"] < 0 and 80 < first["days_to_second"] < 100
+    assert curve["ret_spread"].iloc[1] == pytest.approx(
+        curve["ret_front"].iloc[1] - curve["ret_second"].iloc[1]
+    )
+    # Z6 drops out of the front at its guard even if still loud; after its last bar its price is NaN
+    close = curated.engine_inputs(bars)
+    assert close["HGZ2026"].isna().iloc[-1] and close["HGH2027"].notna().all()

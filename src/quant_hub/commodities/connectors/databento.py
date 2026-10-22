@@ -42,7 +42,7 @@ LICENCE = (
 )
 BARS = ["ts", "open", "high", "low", "close", "volume", "symbol", "instrument_id"]
 _MONTHS = "FGHJKMNQUVXZ"
-_CONTRACT = re.compile(rf"^(?P<root>[A-Z0-9]+?)(?P<month>[{_MONTHS}])(?P<year>\d{{1,2}})$")
+_CONTRACT = re.compile(rf"^(?P<root>[A-Z0-9]+?)(?P<month>[{_MONTHS}])(?P<year>\d{{1,4}})$")
 
 
 class CostLimitExceeded(RuntimeError):
@@ -159,12 +159,58 @@ def bars_to_frame(store) -> pd.DataFrame:
     return out[BARS].sort_values(["symbol", "ts"]).reset_index(drop=True)
 
 
+def resolve_year(code: str, first_bar) -> int:
+    """Four-digit delivery year of a month-year code (`Z6`, `Z26`, `Z2026`) seen on `first_bar`.
+
+    Globex symbols carry one digit and are reused every ten years (HGZ5 was December
+    2015 and is December 2025 again), so the decade is the earliest one in which the
+    delivery month is not before the contract's first bar (minus a month of slack).
+    """
+    month = _MONTHS.index(code[0]) + 1
+    digits = code[1:]
+    if len(digits) == 4:
+        return int(digits)
+    first = pd.Timestamp(first_bar).tz_localize(None).normalize()
+    if len(digits) == 2:
+        return 2000 + int(digits) if int(digits) < 70 else 1900 + int(digits)
+    base = first.year - first.year % 10
+    for year in (base + int(digits) - 10, base + int(digits), base + int(digits) + 10):
+        if pd.Timestamp(year=year, month=month, day=1) >= first - pd.Timedelta(days=31):
+            return year
+    raise ValueError(f"cannot place {code} seen first on {first.date()}")
+
+
+def contract_id(symbol: str, first_bar) -> str:
+    """Unambiguous asset id: `HGZ6` seen in 2024 -> `HGZ2026`; spreads leg by leg."""
+    legs = []
+    for leg in symbol.split("-"):
+        m = _CONTRACT.match(leg)
+        if m is None:
+            return symbol
+        legs.append(f"{m['root']}{m['month']}{resolve_year(m['month'] + m['year'], first_bar)}")
+    return "-".join(legs)
+
+
 def write_bars(df: pd.DataFrame, exchange: str = EXCHANGE, dataset: str = "futures_1d") -> int:
-    """Lay daily bars out per contract: `futures_1d/exchange=cme/asset=<symbol>/year=.../`."""
+    """Lay daily bars out per contract: `futures_1d/exchange=cme/asset=<contract id>/year=.../`.
+
+    One Databento instrument_id is one contract; its asset id carries the full delivery
+    year (`contract_id`), so the two instruments that shared the raw symbol `HGZ5` land
+    in `HGZ2015` and `HGZ2025`. The raw `symbol` column is kept inside the rows.
+    """
     n = 0
-    for symbol, sub in df.groupby("symbol"):
-        n += storage.write_partition(sub, dataset, exchange, str(symbol))
+    keys = ["symbol", "instrument_id"] if df["instrument_id"].notna().any() else ["symbol"]
+    for _, sub in df.groupby(keys, dropna=False):
+        asset = contract_id(str(sub["symbol"].iloc[0]), sub["ts"].min())
+        n += storage.write_partition(sub, dataset, exchange, asset)
     return n
+
+
+def read_file(path: Path):
+    """The DBN store of a file bought earlier (no network, no cost)."""
+    import databento as db
+
+    return db.DBNStore.from_file(path)
 
 
 def is_spread(symbol: str) -> bool:
@@ -179,7 +225,7 @@ def root_of(symbol: str) -> str | None:
 
 
 def expiry_code(symbol: str) -> str | None:
-    """Month-year code of an outright (`HGZ6` -> `Z6`), None for spreads or non-contracts."""
+    """Month-year code of an outright (`HGZ2026` -> `Z2026`), None for spreads or non-contracts."""
     if is_spread(symbol):
         return None
     m = _CONTRACT.match(symbol)
