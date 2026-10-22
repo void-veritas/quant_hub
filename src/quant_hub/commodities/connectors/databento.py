@@ -28,6 +28,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from quant_hub.commodities import storage
@@ -230,3 +231,126 @@ def expiry_code(symbol: str) -> str | None:
         return None
     m = _CONTRACT.match(symbol)
     return f"{m['month']}{m['year']}" if m else None
+
+
+# ---------------------------------------------------------------- other schemas
+
+STAT_TYPES = {  # Databento StatType -> column; price-valued unless listed in STAT_QUANTITY
+    1: "open",
+    3: "settlement",
+    4: "session_low",
+    5: "session_high",
+    6: "cleared_volume",
+    9: "open_interest",
+    10: "fixing",
+    11: "close",
+}
+STAT_QUANTITY = {"cleared_volume", "open_interest"}
+STATS = ["ts", "symbol", "instrument_id", *STAT_TYPES.values()]
+
+
+def stats_to_frame(store) -> pd.DataFrame:
+    """`statistics` records -> one row per (contract, reference day) with the stats as columns.
+
+    `ts` is the statistic's reference day (`ts_ref`, the CME trade date) at UTC
+    midnight; the last update per (contract, day, statistic) wins. Prices are
+    settlement/open/high/low/close/fixing, quantities are open interest and
+    cleared volume.
+    """
+    df = store if isinstance(store, pd.DataFrame) else store.to_df()
+    df = df.reset_index()
+    df = df[df["stat_type"].isin(STAT_TYPES)].copy()
+    ref = pd.to_datetime(df["ts_ref"], utc=True, errors="coerce")
+    ref = ref.where(ref.notna() & (ref.dt.year > 1970), pd.to_datetime(df["ts_event"], utc=True))
+    df["ts"] = ref.dt.normalize()
+    df["stat"] = df["stat_type"].map(STAT_TYPES)
+    df["value"] = np.where(
+        df["stat"].isin(STAT_QUANTITY), df["quantity"].astype(float), df["price"].astype(float)
+    )
+    df = df.sort_values("ts_event").drop_duplicates(
+        ["symbol", "instrument_id", "ts", "stat"], keep="last"
+    )
+    wide = df.pivot_table(
+        index=["ts", "symbol", "instrument_id"], columns="stat", values="value", aggfunc="last"
+    ).reset_index()
+    for c in STAT_TYPES.values():
+        if c not in wide:
+            wide[c] = np.nan
+    wide["symbol"] = wide["symbol"].astype(str)
+    return wide[STATS].sort_values(["symbol", "ts"]).reset_index(drop=True)
+
+
+def option_bars_to_frame(store) -> pd.DataFrame:
+    """Option daily bars with the underlying expiry as the asset (`HXEZ6 C45000` -> HXEZ2026)."""
+    bars = bars_to_frame(store)
+    return bars
+
+
+def write_option_bars(
+    df: pd.DataFrame, exchange: str = EXCHANGE, dataset: str = "options_1d"
+) -> int:
+    """Option bars per expiry (`options_1d/exchange=cme/asset=HXEZ2026`), one row per strike."""
+    n = 0
+    series = df["symbol"].str.split(" ").str[0]
+    for base, sub in df.groupby(series):
+        asset = contract_id(str(base), sub["ts"].min())
+        n += storage.write_partition(sub, dataset, exchange, asset, key=("ts", "symbol"))
+    return n
+
+
+DEFINITION_COLUMNS = [
+    "ts_event",
+    "instrument_id",
+    "raw_symbol",
+    "instrument_class",
+    "expiration",
+    "activation",
+    "strike_price",
+    "underlying",
+    "underlying_id",
+    "min_price_increment",
+    "unit_of_measure_qty",
+    "currency",
+    "exchange",
+    "asset",
+    "security_type",
+    "maturity_year",
+    "maturity_month",
+]
+
+
+def definitions_to_frame(store) -> pd.DataFrame:
+    """`definition` records -> one row per instrument_id (latest), useful columns only."""
+    df = store if isinstance(store, pd.DataFrame) else store.to_df()
+    df = df.reset_index()
+    cols = [c for c in DEFINITION_COLUMNS if c in df.columns]
+    out = df.sort_values("ts_event").drop_duplicates("instrument_id", keep="last")[cols]
+    return out.reset_index(drop=True)
+
+
+def layout(store, schema: str, root_hint: str = "HG") -> str:
+    """Lay a bought DBN store out in the raw layer by schema; returns a one-line summary."""
+    if schema == "ohlcv-1d":
+        bars = bars_to_frame(store)
+        if bars["symbol"].str.contains(" ").any():  # options carry the strike after a space
+            n = write_option_bars(bars)
+            return f"options_1d: {n} rows, {bars['symbol'].nunique()} option symbols"
+        n = write_bars(bars, dataset="futures_1d")
+        return f"futures_1d: {n} rows, {bars['symbol'].nunique()} raw symbols"
+    if schema == "ohlcv-1h":
+        bars = bars_to_frame(store)
+        n = write_bars(bars, dataset="futures_1h")
+        return f"futures_1h: {n} rows, {bars['symbol'].nunique()} raw symbols"
+    if schema == "statistics":
+        st = stats_to_frame(store)
+        n = write_bars(st, dataset="futures_stats")
+        return f"futures_stats: {n} rows, {st['symbol'].nunique()} raw symbols"
+    if schema == "definition":
+        d = definitions_to_frame(store)
+        path = storage.layer_path("reference", root_hint, "definitions.parquet")
+        if path.exists():
+            old = pd.read_parquet(path)
+            d = pd.concat([old, d]).drop_duplicates("instrument_id", keep="last")
+        d.to_parquet(path, index=False)
+        return f"reference/{root_hint}/definitions.parquet: {len(d)} instruments"
+    return f"{schema}: stored as DBN only (no layout rule)"

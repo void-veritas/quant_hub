@@ -54,23 +54,19 @@ def cmd_databento(args) -> None:
         return
     store, path = dbn.fetch(req, max_usd=args.max_usd, cli=cli)
     print(f"stored {path} ({path.stat().st_size / 1e6:.1f} MB on disk)")
-    if args.schema.startswith("ohlcv"):
-        bars = dbn.bars_to_frame(store)
-        n = dbn.write_bars(bars, dataset="futures_1d" if args.schema == "ohlcv-1d" else args.schema)
-        spreads = bars["symbol"].map(dbn.is_spread)
-        print(
-            f"futures_1d: {n} rows written, {bars['symbol'].nunique()} symbols "
-            f"({int((~spreads).sum())} outright rows, {int(spreads.sum())} spread rows), "
-            f"{bars['ts'].min().date()} -> {bars['ts'].max().date()}"
-        )
+    print(dbn.layout(store, args.schema, root_hint=_root_hint(req["symbols"])))
+
+
+def _root_hint(symbols: list[str]) -> str:
+    return symbols[0].split(".")[0] if len(symbols) == 1 else "multi"
 
 
 def cmd_databento_file(args) -> None:
     """Lay out (again) the bars of a DBN file bought earlier; no network, no cost."""
     path = Path(args.file)
-    bars = dbn.bars_to_frame(dbn.read_file(path))
-    n = dbn.write_bars(bars, dataset=args.dataset)
-    print(f"{path.name}: {n} rows, {bars['symbol'].nunique()} raw symbols -> {args.dataset}")
+    schema = args.schema or path.name.split("_")[1]
+    symbols = path.name.split("_")[2].split("+")
+    print(f"{path.name}: {dbn.layout(dbn.read_file(path), schema, root_hint=_root_hint(symbols))}")
 
 
 YAHOO_MACRO = {  # path-safe asset id -> Yahoo symbol; daily closes for macro factor candidates
@@ -170,7 +166,7 @@ def main(argv=None) -> None:
 
     p = sub.add_parser("databento-file", help="re-lay out a stored DBN file (no purchase)")
     p.add_argument("--file", required=True, help="path of the .dbn.zst under raw/databento/")
-    p.add_argument("--dataset", default="futures_1d")
+    p.add_argument("--schema", help="default: taken from the file name")
 
     p = sub.add_parser("yahoo", help="daily closes of Yahoo symbols (macro candidates) -> yahoo_1d")
     g = p.add_mutually_exclusive_group(required=True)
