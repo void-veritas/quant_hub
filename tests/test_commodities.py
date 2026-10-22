@@ -287,7 +287,8 @@ def test_health_rules_of_the_domain(croot):
     # when every contract of the root goes quiet, exactly the newest one is flagged
     late = health.report(now=now + pd.Timedelta(days=10))
     fut = health.flag(late)
-    assert fut[fut["dataset"] == "futures_1d"]["asset"].tolist() == ["CLK2020", "HGZ6"]  # one per root
+    quiet = fut[fut["dataset"] == "futures_1d"]["asset"].tolist()
+    assert quiet == ["CLK2020", "HGZ6"]  # one flagged contract per quiet root
     assert health.flag(late, stale_days=100.0).empty is False  # xyz-SILVER's gap stays flagged
 
 
