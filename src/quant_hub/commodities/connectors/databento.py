@@ -201,6 +201,9 @@ def write_bars(df: pd.DataFrame, exchange: str = EXCHANGE, dataset: str = "futur
     in `HGZ2015` and `HGZ2025`. The raw `symbol` column is kept inside the rows.
     """
     n = 0
+    # a .FUT parent also carries butterflies and user-defined spreads ("ZW:CF Z4H5K5N5",
+    # "UD:2U:..."): not contracts, and their names are not file names
+    df = df[~df["symbol"].str.contains(r"[: ]", regex=True)]
     keys = ["symbol", "instrument_id"] if df["instrument_id"].notna().any() else ["symbol"]
     for _, sub in df.groupby(keys, dropna=False):
         # CME reuses instrument ids a decade later (gold June 2010 and June 2020 shared one):
