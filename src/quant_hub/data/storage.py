@@ -59,11 +59,14 @@ def write_partition(
     exchange: str,
     asset: str,
     root: Path = RAW_ROOT,
+    key: tuple[str, ...] = ("ts",),
 ) -> int:
-    """Merge `df` into the dataset's partitions, deduplicating on `ts`.
+    """Merge `df` into the dataset's partitions, deduplicating on `key` (default `ts`).
 
     `df` needs a UTC-aware `ts` column; partition columns (exchange/asset/year)
-    must NOT be in the frame — they live in the path. Returns rows written.
+    must NOT be in the frame — they live in the path. A dataset with several rows
+    per timestamp (options of one expiry, one row per strike) passes a wider key
+    such as `("ts", "symbol")`. Returns rows written.
     """
     if df.empty:
         return 0
@@ -80,7 +83,7 @@ def write_partition(
                 existing = pd.read_parquet(path)
                 existing["ts"] = pd.to_datetime(existing["ts"], utc=True)
                 chunk = pd.concat([existing, chunk], ignore_index=True)
-                chunk = chunk.drop_duplicates(subset="ts", keep="last").sort_values("ts")
+                chunk = chunk.drop_duplicates(subset=list(key), keep="last").sort_values(list(key))
             tmp = path.with_suffix(".parquet.tmp")
             chunk.to_parquet(tmp, index=False)
             tmp.replace(path)  # atomic swap: readers never see a half-written file

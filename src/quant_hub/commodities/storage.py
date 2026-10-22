@@ -17,9 +17,11 @@ LAYERS = ("raw", "reference", "curated")
 BUCKET = "yolo-commodities-ep"
 
 
-def write_partition(df: pd.DataFrame, dataset: str, exchange: str, asset: str) -> int:
+def write_partition(
+    df: pd.DataFrame, dataset: str, exchange: str, asset: str, key: tuple[str, ...] = ("ts",)
+) -> int:
     """`quant_hub.data.storage.write_partition` on the commodities raw root."""
-    return _storage.write_partition(df, dataset, exchange, asset, root=RAW_ROOT)
+    return _storage.write_partition(df, dataset, exchange, asset, root=RAW_ROOT, key=key)
 
 
 def list_partitions(dataset: str) -> pd.DataFrame:
