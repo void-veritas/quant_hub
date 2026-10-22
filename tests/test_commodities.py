@@ -242,7 +242,7 @@ def test_health_rules_of_the_domain(croot):
     storage.write_partition(_bars("HGZ7", "2026-09-01", 10, freq="5D"), "futures_1d", "cme", "HGZ7")
     neg = _bars("HGZ6-HGH7", "2026-10-01", 10).assign(open=-0.1, high=-0.05, low=-0.2, close=-0.1)
     storage.write_partition(neg, "futures_1d", "cme", "HGZ6-HGH7")
-    wti = _bars("CLK2020", "2020-04-15", 5).assign(open=-10.0, high=-5.0, low=-40.0, close=-37.63)
+    wti = _bars("CLK2020", "2026-10-13", 5).assign(open=-10.0, high=-5.0, low=-40.0, close=-37.63)
     storage.write_partition(wti, "futures_1d", "cme", "CLK2020")  # the real negative settlement
     # COT: weekly, last report 10 days ago -> fine under the 14-day rule
     storage.write_partition(
