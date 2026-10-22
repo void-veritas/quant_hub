@@ -239,6 +239,12 @@ def test_health_rules_of_the_domain(croot):
         "cftc",
         "085692",
     )
+    storage.write_partition(  # a market CFTC stopped reporting: not a stale feed
+        _bars("c", "2016-07-07", 15, freq="7D").drop(columns=["open", "high", "low", "close"]),
+        "cot_disagg",
+        "cftc",
+        "967654",
+    )
 
     df = health.report(now=now)
     st = df.set_index(["dataset", "asset"])["status"]
