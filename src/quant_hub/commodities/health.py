@@ -39,6 +39,7 @@ STALE_DAYS = {
     "funding": 3.0,
     "futures_1d": 5.0,
     "futures_1h": 5.0,
+    "futures_stats": 5.0,
     "options_1d": 5.0,
     "futures_cont_1d": 5.0,
     "cot_disagg": 14.0,
@@ -47,7 +48,7 @@ GAPS_FLAGGED = {"ohlcv_1d", "funding"}  # the others are sparse or on trading da
 # cross-check sources with known OHLC glitches (Yahoo): sanity problems are reported, not flagged
 SANITY_INFORMATIONAL = {"futures_cont_1d"}
 # datasets whose staleness is judged on the newest row only (expired contracts, dead CFTC markets)
-STALE_BY_NEWEST = {"futures_1d", "futures_1h", "cot_disagg", "options_1d"}
+STALE_BY_NEWEST = {"futures_1d", "futures_1h", "futures_stats", "cot_disagg", "options_1d"}
 # several rows per timestamp by design (one per strike): the duplicate/sorted checks do not apply
 MULTI_ROW = {"options_1d"}
 COLUMNS = [
@@ -136,7 +137,7 @@ def flag(df: pd.DataFrame, stale_days: float | None = None) -> pd.DataFrame:
         sel = df["dataset"] == ds
         if not sel.any():
             continue
-        if ds in ("futures_1d", "futures_1h"):
+        if ds in ("futures_1d", "futures_1h", "futures_stats"):
             groups = df.loc[sel, "asset"].map(lambda a: root_of(a) or a)
         else:
             groups = pd.Series(ds, index=df.index[sel])
