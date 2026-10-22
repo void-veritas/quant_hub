@@ -113,6 +113,7 @@ def report(
             {
                 "futures_1d": "contract",
                 "futures_1h": "contract",
+                "futures_stats": "contract",
                 "cot_disagg": "market",
                 "options_1d": "series",
             }.get(ds, ""),
