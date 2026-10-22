@@ -38,6 +38,8 @@ STALE_DAYS = {
     "ohlcv_1d": 3.0,
     "funding": 3.0,
     "futures_1d": 5.0,
+    "futures_1h": 5.0,
+    "options_1d": 5.0,
     "futures_cont_1d": 5.0,
     "cot_disagg": 14.0,
 }

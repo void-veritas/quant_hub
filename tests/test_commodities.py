@@ -254,7 +254,7 @@ def test_health_rules_of_the_domain(croot):
         "967654",
     )
 
-    opt = pd.concat([_bars("HXEZ6 C650", "2026-09-01", 10), _bars("HXEZ6 C700", "2026-09-01", 10)])
+    opt = pd.concat([_bars("HXEZ6 C650", "2026-10-11", 10), _bars("HXEZ6 C700", "2026-10-11", 10)])
     storage.write_partition(opt, "options_1d", "cme", "HXEZ2026", key=("ts", "symbol"))
     old_opt = _bars("HXEZ5 C400", "2025-09-01", 10)
     storage.write_partition(old_opt, "options_1d", "cme", "HXEZ2025", key=("ts", "symbol"))
