@@ -12,7 +12,8 @@ sanity, gaps, staleness) over `data/commodities/raw`, with rules that fit the do
 - `futures_1d` (one asset per contract): bars exist only on days with trades, so gaps
   are counted but never flagged; staleness is judged per product root (the newest bar
   across all its contracts), because an expired contract is not a stale feed; calendar
-  spreads (`HGZ6-HGH7`) legitimately trade at negative prices;
+  spreads (`HGZ6-HGH7`) legitimately trade at negative prices, and so did WTI May 2020
+  (`KNOWN_NEGATIVE`);
 - `options_1d`: one row per strike and day, so duplicate timestamps are by design; an
   expired option series is not stale, the newest series is;
 - `futures_cont_1d`, `cot_disagg`: weekends and holidays are not gaps; staleness
@@ -47,6 +48,8 @@ STALE_DAYS = {
 GAPS_FLAGGED = {"ohlcv_1d", "funding"}  # the others are sparse or on trading days
 # cross-check sources with known OHLC glitches (Yahoo): sanity problems are reported, not flagged
 SANITY_INFORMATIONAL = {"futures_cont_1d"}
+# contracts that really traded below zero: WTI May 2020 settled at -37.63 on 2020-04-20
+KNOWN_NEGATIVE = {"CLK2020"}
 # datasets whose staleness is judged on the newest row only (expired contracts, dead CFTC markets)
 STALE_BY_NEWEST = {"futures_1d", "futures_1h", "futures_stats", "cot_disagg", "options_1d"}
 # several rows per timestamp by design (one per strike): the duplicate/sorted checks do not apply
@@ -105,7 +108,9 @@ def report(
     multi = df["dataset"].isin(MULTI_ROW)
     df.loc[multi, "problems"] = df.loc[multi, "problems"].map(_drop_multirow_problems)
     # calendar spreads trade at negative prices: the sign check does not apply to them
-    spread = df["dataset"].isin(["futures_1d", "futures_1h"]) & df["asset"].map(is_spread)
+    spread = df["dataset"].isin(["futures_1d", "futures_1h"]) & (
+        df["asset"].map(is_spread) | df["asset"].isin(KNOWN_NEGATIVE)
+    )
     df.loc[spread, "problems"] = df.loc[spread, "problems"].map(_drop_sign_problems)
     df["status"] = [
         status.get(

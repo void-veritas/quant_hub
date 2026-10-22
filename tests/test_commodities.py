@@ -242,6 +242,8 @@ def test_health_rules_of_the_domain(croot):
     storage.write_partition(_bars("HGZ7", "2026-09-01", 10, freq="5D"), "futures_1d", "cme", "HGZ7")
     neg = _bars("HGZ6-HGH7", "2026-10-01", 10).assign(open=-0.1, high=-0.05, low=-0.2, close=-0.1)
     storage.write_partition(neg, "futures_1d", "cme", "HGZ6-HGH7")
+    wti = _bars("CLK2020", "2020-04-15", 5).assign(open=-10.0, high=-5.0, low=-40.0, close=-37.63)
+    storage.write_partition(wti, "futures_1d", "cme", "CLK2020")  # the real negative settlement
     # COT: weekly, last report 10 days ago -> fine under the 14-day rule
     storage.write_partition(
         _bars("c", "2026-07-07", 15, freq="7D").drop(columns=["open", "high", "low", "close"]),
@@ -276,6 +278,7 @@ def test_health_rules_of_the_domain(croot):
     assert ("ohlcv_1d", "flx-COPPER") not in flagged  # delisted
     assert not any(d == "futures_1d" for d, _ in flagged)  # root HG is fresh; negative spread ok
     assert df.set_index("asset").loc["HGZ6-HGH7", "problems"] == ""
+    assert df.set_index("asset").loc["CLK2020", "problems"] == ""
     assert not any(d == "options_1d" for d, _ in flagged)  # strikes share a day; old series expired
     assert st[("options_1d", "HXEZ2026")] == "series"
     assert ("cot_disagg", "085692") not in flagged
