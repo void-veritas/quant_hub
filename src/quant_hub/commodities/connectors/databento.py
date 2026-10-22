@@ -42,6 +42,7 @@ LICENCE = (
     "not for redistribution."
 )
 BARS = ["ts", "open", "high", "low", "close", "volume", "symbol", "instrument_id"]
+REUSE_GAP = pd.Timedelta(days=3 * 365)  # no contract is silent this long; a reused id is
 _MONTHS = "FGHJKMNQUVXZ"
 _CONTRACT = re.compile(rf"^(?P<root>[A-Z0-9]+?)(?P<month>[{_MONTHS}])(?P<year>\d{{1,4}})$")
 
@@ -202,8 +203,13 @@ def write_bars(df: pd.DataFrame, exchange: str = EXCHANGE, dataset: str = "futur
     n = 0
     keys = ["symbol", "instrument_id"] if df["instrument_id"].notna().any() else ["symbol"]
     for _, sub in df.groupby(keys, dropna=False):
-        asset = contract_id(str(sub["symbol"].iloc[0]), sub["ts"].min())
-        n += storage.write_partition(sub, dataset, exchange, asset)
+        # CME reuses instrument ids a decade later (gold June 2010 and June 2020 shared one):
+        # a gap of more than REUSE_GAP between bars starts a new contract
+        sub = sub.sort_values("ts")
+        episode = (sub["ts"].diff() > REUSE_GAP).cumsum()
+        for _, part in sub.groupby(episode):
+            asset = contract_id(str(part["symbol"].iloc[0]), part["ts"].min())
+            n += storage.write_partition(part, dataset, exchange, asset)
     return n
 
 

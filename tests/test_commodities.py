@@ -156,6 +156,14 @@ def test_databento_bars_per_contract_with_unambiguous_ids(croot):
     assert set(parts["exchange"]) == {"cme"}
     stored = pd.read_parquet(parts[parts["asset"] == "HGZ2025"]["path"].iloc[0])
     assert set(stored["symbol"]) == {"HGZ5"}
+    # one instrument id reused a decade later (gold): the gap splits it into two contracts
+    g = pd.concat([_bars("GCM1", "2010-06-07", 2), _bars("GCM1", "2021-03-01", 2)]).assign(
+        instrument_id=77
+    )
+    bars = dbn.bars_to_frame(g.rename(columns={"ts": "ts_event"}).set_index("ts_event"))
+    assert dbn.write_bars(bars) == 4
+    assets = set(storage.list_partitions("futures_1d")["asset"])
+    assert {"GCM2011", "GCM2021"} <= assets
 
 
 def test_databento_symbol_helpers():
