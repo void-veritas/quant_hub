@@ -328,11 +328,15 @@ def definitions_to_frame(store) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
-def layout(store, schema: str, root_hint: str = "HG") -> str:
-    """Lay a bought DBN store out in the raw layer by schema; returns a one-line summary."""
+def layout(store, schema: str, root_hint: str = "HG", options: bool = False) -> str:
+    """Lay a bought DBN store out in the raw layer by schema; returns a one-line summary.
+
+    `options` says the request was for an options parent (`HXE.OPT`): option bars go
+    to `options_1d` per expiry, everything else to the futures datasets.
+    """
     if schema == "ohlcv-1d":
         bars = bars_to_frame(store)
-        if bars["symbol"].str.contains(" ").any():  # options carry the strike after a space
+        if options:
             n = write_option_bars(bars)
             return f"options_1d: {n} rows, {bars['symbol'].nunique()} option symbols"
         n = write_bars(bars, dataset="futures_1d")

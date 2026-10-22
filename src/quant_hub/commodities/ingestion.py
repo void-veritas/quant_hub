@@ -54,11 +54,22 @@ def cmd_databento(args) -> None:
         return
     store, path = dbn.fetch(req, max_usd=args.max_usd, cli=cli)
     print(f"stored {path} ({path.stat().st_size / 1e6:.1f} MB on disk)")
-    print(dbn.layout(store, args.schema, root_hint=_root_hint(req["symbols"])))
+    print(
+        dbn.layout(
+            store,
+            args.schema,
+            root_hint=_root_hint(req["symbols"]),
+            options=_is_options(req["symbols"]),
+        )
+    )
 
 
 def _root_hint(symbols: list[str]) -> str:
     return symbols[0].split(".")[0] if len(symbols) == 1 else "multi"
+
+
+def _is_options(symbols: list[str]) -> bool:
+    return all(s.endswith(".OPT") for s in symbols)
 
 
 def cmd_databento_file(args) -> None:
@@ -66,7 +77,10 @@ def cmd_databento_file(args) -> None:
     path = Path(args.file)
     schema = args.schema or path.name.split("_")[1]
     symbols = path.name.split("_")[2].split("+")
-    print(f"{path.name}: {dbn.layout(dbn.read_file(path), schema, root_hint=_root_hint(symbols))}")
+    summary = dbn.layout(
+        dbn.read_file(path), schema, root_hint=_root_hint(symbols), options=_is_options(symbols)
+    )
+    print(f"{path.name}: {summary}")
 
 
 YAHOO_MACRO = {  # path-safe asset id -> Yahoo symbol; daily closes for macro factor candidates
