@@ -160,10 +160,12 @@ def test_databento_bars_per_contract_with_unambiguous_ids(croot):
     g = pd.concat([_bars("GCM1", "2010-06-07", 2), _bars("GCM1", "2021-03-01", 2)]).assign(
         instrument_id=77
     )
-    bars = dbn.bars_to_frame(g.rename(columns={"ts": "ts_event"}).set_index("ts_event"))
+    junk = _bars("ZW:CF Z4H5K5N5", "2024-07-17", 2).assign(instrument_id=78)  # butterfly: skipped
+    frame = pd.concat([g, junk]).rename(columns={"ts": "ts_event"}).set_index("ts_event")
+    bars = dbn.bars_to_frame(frame)
     assert dbn.write_bars(bars) == 4
     assets = set(storage.list_partitions("futures_1d")["asset"])
-    assert {"GCM2011", "GCM2021"} <= assets
+    assert {"GCM2011", "GCM2021"} <= assets and not any(":" in a for a in assets)
 
 
 def test_databento_symbol_helpers():
