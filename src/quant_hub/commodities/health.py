@@ -13,6 +13,8 @@ sanity, gaps, staleness) over `data/commodities/raw`, with rules that fit the do
   are counted but never flagged; staleness is judged per product root (the newest bar
   across all its contracts), because an expired contract is not a stale feed; calendar
   spreads (`HGZ6-HGH7`) legitimately trade at negative prices;
+- `options_1d`: one row per strike and day, so duplicate timestamps are by design; an
+  expired option series is not stale, the newest series is;
 - `futures_cont_1d`, `cot_disagg`: weekends and holidays are not gaps; staleness
   thresholds are 5 and 14 days (COT is weekly and published with a 3-day lag); COT
   staleness is judged on the newest market (hundreds of CFTC markets are dead), and
@@ -43,7 +45,9 @@ GAPS_FLAGGED = {"ohlcv_1d", "funding"}  # the others are sparse or on trading da
 # cross-check sources with known OHLC glitches (Yahoo): sanity problems are reported, not flagged
 SANITY_INFORMATIONAL = {"futures_cont_1d"}
 # datasets whose staleness is judged on the newest row only (expired contracts, dead CFTC markets)
-STALE_BY_NEWEST = {"futures_1d", "cot_disagg"}
+STALE_BY_NEWEST = {"futures_1d", "futures_1h", "cot_disagg", "options_1d"}
+# several rows per timestamp by design (one per strike): the duplicate/sorted checks do not apply
+MULTI_ROW = {"options_1d"}
 COLUMNS = [
     "dataset",
     "exchange",
@@ -70,6 +74,12 @@ def _hip3_status() -> dict[tuple[str, str], str]:
     }
 
 
+def _drop_multirow_problems(problems: str) -> str:
+    return "; ".join(
+        p for p in problems.split("; ") if p and "duplicate" not in p and "unsorted" not in p
+    )
+
+
 def _drop_sign_problems(problems: str) -> str:
     return "; ".join(p for p in problems.split("; ") if p and "non-positive" not in p)
 
@@ -89,11 +99,21 @@ def report(
     if df.empty:
         return df
     status = _hip3_status()
+    multi = df["dataset"].isin(MULTI_ROW)
+    df.loc[multi, "problems"] = df.loc[multi, "problems"].map(_drop_multirow_problems)
     # calendar spreads trade at negative prices: the sign check does not apply to them
-    spread = (df["dataset"] == "futures_1d") & df["asset"].map(is_spread)
+    spread = df["dataset"].isin(["futures_1d", "futures_1h"]) & df["asset"].map(is_spread)
     df.loc[spread, "problems"] = df.loc[spread, "problems"].map(_drop_sign_problems)
     df["status"] = [
-        status.get((ex, a), {"futures_1d": "contract", "cot_disagg": "market"}.get(ds, ""))
+        status.get(
+            (ex, a),
+            {
+                "futures_1d": "contract",
+                "futures_1h": "contract",
+                "cot_disagg": "market",
+                "options_1d": "series",
+            }.get(ds, ""),
+        )
         for ds, ex, a in zip(df["dataset"], df["exchange"], df["asset"], strict=True)
     ]
     return df
@@ -107,14 +127,14 @@ def flag(df: pd.DataFrame, stale_days: float | None = None) -> pd.DataFrame:
     bad = (df["problems"] != "") & ~df["dataset"].isin(SANITY_INFORMATIONAL)
     # a zero-volume day of an illiquid perp is stored (synthetic row), not missing
     bad |= (df["missing"] > df["synthetic_rows"]) & df["dataset"].isin(GAPS_FLAGGED)
-    live = ~df["status"].isin(["delisted", "contract", "market"])
+    live = ~df["status"].isin(["delisted", "contract", "market", "series"])
     bad |= (df["stale_days"] > limit) & live
     # futures and COT: staleness per product root (or per dataset), attached to the newest row
     for ds in STALE_BY_NEWEST:
         sel = df["dataset"] == ds
         if not sel.any():
             continue
-        if ds == "futures_1d":
+        if ds in ("futures_1d", "futures_1h"):
             groups = df.loc[sel, "asset"].map(lambda a: root_of(a) or a)
         else:
             groups = pd.Series(ds, index=df.index[sel])

@@ -254,6 +254,11 @@ def test_health_rules_of_the_domain(croot):
         "967654",
     )
 
+    opt = pd.concat([_bars("HXEZ6 C650", "2026-09-01", 10), _bars("HXEZ6 C700", "2026-09-01", 10)])
+    storage.write_partition(opt, "options_1d", "cme", "HXEZ2026", key=("ts", "symbol"))
+    old_opt = _bars("HXEZ5 C400", "2025-09-01", 10)
+    storage.write_partition(old_opt, "options_1d", "cme", "HXEZ2025", key=("ts", "symbol"))
+
     df = health.report(now=now)
     st = df.set_index(["dataset", "asset"])["status"]
     assert (
@@ -269,6 +274,8 @@ def test_health_rules_of_the_domain(croot):
     assert ("ohlcv_1d", "flx-COPPER") not in flagged  # delisted
     assert not any(d == "futures_1d" for d, _ in flagged)  # root HG is fresh; negative spread ok
     assert df.set_index("asset").loc["HGZ6-HGH7", "problems"] == ""
+    assert not any(d == "options_1d" for d, _ in flagged)  # strikes share a day; old series expired
+    assert st[("options_1d", "HXEZ2026")] == "series"
     assert ("cot_disagg", "085692") not in flagged
     assert ("cot_disagg", "967654") not in flagged  # dead market: not a stale feed
     assert st[("cot_disagg", "967654")] == "market"

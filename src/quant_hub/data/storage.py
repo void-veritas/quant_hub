@@ -72,6 +72,7 @@ def write_partition(
         return 0
     if "ts" not in df.columns:
         raise ValueError("expected a 'ts' column")
+    df = df.reset_index(drop=True)  # callers may pass concatenated frames with repeated labels
     ts = pd.to_datetime(df["ts"], utc=True)
     df = df.assign(ts=ts).sort_values("ts")
 
