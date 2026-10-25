@@ -5,7 +5,8 @@ Bucket `hyperliquid-archive` (requester pays; AWS credentials required):
     market_data/<YYYYMMDD>/<hour>/l2Book/<COIN>.lz4
 
 One file per coin per hour: newline-delimited JSON, one `l2Book` websocket
-message per line (~0.55 s cadence, 20 levels per side), lz4-frame compressed,
+message per line (~0.55 s cadence until 2026-06-15, 5.4 s from 2026-06-20;
+20 levels per side), lz4-frame compressed,
 ~1 MB each for majors. Coverage starts 2023-04-15 and is updated daily.
 Trades/fills live in `hl-mainnet-node-data` and are handled separately.
 
