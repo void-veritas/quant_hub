@@ -293,12 +293,28 @@ class Session:
                 self._log("cancel failed", logging.WARNING, cloid=o.cloid, coin=o.coin)
 
     async def _execute_plan(self, plan, quotes: dict[str, Quote]) -> None:
+        # A cancel that fails usually means the order filled in the meantime: its
+        # replacement is not sent this tick (the next tick re-plans from the fill).
+        unconfirmed: set[str] = set()
         for o in plan.cancel:
             if await self.adapter.cancel(o):
                 self.oms.mark(o.cloid, "canceled", reason=f"policy {plan.phase}")
+            else:
+                unconfirmed.add(o.coin)
             self.last_quote_ts.pop(o.cloid, None)
+        # fills that arrived while quotes were refreshed or orders cancelled: the plan was
+        # sized before them, so positions are re-read before any new order is checked
+        planned_on = self.positions()
+        self._apply_events()
         pos = self.positions()
         for it in plan.send:
+            if it.coin in unconfirmed:
+                self._log("send skipped: cancel not confirmed", coin=it.coin, side=it.side)
+                continue
+            if abs(pos.get(it.coin, 0.0) - planned_on.get(it.coin, 0.0)) > 1e-12:
+                # a fill landed after the plan was sized: re-plan this coin next tick
+                self._log("send skipped: position moved", coin=it.coin, side=it.side, size=it.size)
+                continue
             why = self.risk.check_order(
                 it.coin,
                 it.side,

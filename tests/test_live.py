@@ -554,3 +554,33 @@ def test_relative_trade_buffer_skips_small_deltas(tmp_path):
     s = run(session(bk, store, ex, clock))
     assert s.status == "done" and {o.coin for o in ex.placed} == {"ETH"}
     assert ex.positions["BTC"] == 0.0195
+
+
+def test_fill_during_quote_refresh_does_not_double_the_position(tmp_path):
+    """A fill during the quote refresh must not be followed by an IOC for the same size.
+
+    The replacement would be sized on the position before the fill and overshoot the
+    target (2026-10-26 paper run: DOGE and XMR traded 3x their target, then reversed).
+    """
+
+    class RacyExchange(FakeExchange):
+        moved = False
+
+        async def quotes(self, coins):
+            # the market moves through the resting buy exactly when the IOC phase starts
+            if not self.moved and self.clock.now() >= START + timedelta(minutes=1):
+                self.moved = True
+                self.set_quotes({"BTC": Quote(99_900.0, 99_902.0)})
+            return await super().quotes(coins)
+
+    store = Store(tmp_path / "store")
+    clock = SimClock(START + timedelta(seconds=30))
+    ex = RacyExchange(equity=10_000.0, decimals=DECIMALS, clock=clock)
+    ex.set_quotes(dict(QUOTES))
+    store.put(weights_key("yolo_daily", AS_OF), weights_file({"BTC": 0.25}).to_json())
+    bk = book(cross_after_minutes=1, tick_seconds=10.0)
+    run(session(bk, store, ex, clock))
+    target = 0.25 * 10_000.0 / QUOTES["BTC"].mid
+    assert ex.positions["BTC"] == pytest.approx(target, rel=0.02)
+    bought = sum(f.size for f in ex._all_fills if f.coin == "BTC" and f.side == "buy")
+    assert bought <= target * 1.02  # never bought twice
