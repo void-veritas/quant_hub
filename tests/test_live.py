@@ -584,3 +584,33 @@ def test_fill_during_quote_refresh_does_not_double_the_position(tmp_path):
     assert ex.positions["BTC"] == pytest.approx(target, rel=0.02)
     bought = sum(f.size for f in ex._all_fills if f.coin == "BTC" and f.side == "buy")
     assert bought <= target * 1.02  # never bought twice
+
+
+def test_store_mirror_uploads_without_rewriting(tmp_path):
+    """The session log is uploaded as it stands; the open handle keeps writing to it."""
+
+    class FakeS3:
+        def __init__(self):
+            self.objects = {}
+
+        def put_object(self, Bucket, Key, Body):  # noqa: N803 (boto3 signature)
+            self.objects[(Bucket, Key)] = Body
+
+    store = Store(tmp_path / "store", bucket="b")
+    store._s3 = FakeS3()
+    assert store.mirror("logs/yolo_daily_2026-10-27.jsonl") is False  # no file yet
+    p = store.path("logs/yolo_daily_2026-10-27.jsonl")
+    p.parent.mkdir(parents=True)
+    with p.open("a") as fh:
+        fh.write('{"msg": "session started"}\n')
+        fh.flush()
+        inode = p.stat().st_ino
+        assert store.mirror("logs/yolo_daily_2026-10-27.jsonl") is True
+        fh.write('{"msg": "session done"}\n')
+    assert p.stat().st_ino == inode
+    assert p.read_text().count("\n") == 2
+    assert (
+        store._s3.objects[("b", "logs/yolo_daily_2026-10-27.jsonl")]
+        == b'{"msg": "session started"}\n'
+    )
+    assert Store(tmp_path / "local").mirror("logs/x.jsonl") is False  # no bucket: nothing to do

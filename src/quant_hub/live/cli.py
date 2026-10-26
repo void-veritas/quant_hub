@@ -63,12 +63,21 @@ def cmd_run(args) -> int:
 
     book = Book.from_yaml(args.book)
     store = make_store()
-    log = get_logger(
-        "quant_hub.live", Path(store.root) / "logs" / f"{book.book_id}_{args.date}.jsonl"
-    )
+    log_key = f"logs/{book.book_id}_{args.date}.jsonl"
+    log = get_logger("quant_hub.live", Path(store.root) / log_key)
     adapter = make_adapter(book, args.mode, store)
     session = Session(book, store, adapter, args.date, notifier=make_notifier(), log=log)
-    summary = asyncio.run(session.run())
+    try:
+        summary = asyncio.run(session.run())
+    finally:
+        # the session log lives on the server's disk only unless it is mirrored; a failed
+        # upload must not change the session's exit code
+        for h in log.handlers:
+            h.flush()
+        try:
+            store.mirror(log_key)
+        except Exception as err:  # noqa: BLE001
+            print(f"session log not uploaded: {err}", file=sys.stderr)
     print(json.dumps(summary.__dict__, indent=1, default=str))
     return 0 if summary.status in ("done", "closed") else 1
 

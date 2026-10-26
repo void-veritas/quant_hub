@@ -48,6 +48,19 @@ class Store:
             self._client().put_object(Bucket=self.bucket, Key=self._s3_key(key), Body=data)
         return p
 
+    def mirror(self, key: str) -> bool:
+        """Upload an existing local file under ``key`` to the bucket (no local rewrite).
+
+        For append-only files that another handle is still writing, such as the session
+        log: ``put`` would replace the file and detach the open handle. False when there
+        is no bucket or no such file.
+        """
+        p = self.path(key)
+        if not self.bucket or not p.exists():
+            return False
+        self._client().put_object(Bucket=self.bucket, Key=self._s3_key(key), Body=p.read_bytes())
+        return True
+
     def get(self, key: str) -> bytes | None:
         """Read from the bucket if configured (refreshing the local copy), else locally."""
         if self.bucket:
