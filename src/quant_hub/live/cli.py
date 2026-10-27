@@ -81,7 +81,9 @@ def cmd_run(args) -> int:
         except Exception as err:  # noqa: BLE001
             print(f"session log not uploaded: {err}", file=sys.stderr)
     print(json.dumps(summary.__dict__, indent=1, default=str))
-    return 0 if summary.status in ("done", "closed") else 1
+    # no or rejected weights: the session already sent the critical alert with the reason and
+    # traded nothing, so a second "failed, exit 1" from the scheduler would only repeat it
+    return 0 if summary.status in ("done", "closed", "no_weights", "invalid_weights") else 1
 
 
 def cmd_validate(args) -> int:

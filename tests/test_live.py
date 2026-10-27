@@ -717,3 +717,18 @@ def test_riskwatch_pauses_the_book_past_its_pause_level(tmp_path, monkeypatch):
     equity["v"] = 870.0
     assert cli.main(argv) == 0 and store.exists(pause_key("b"))
     assert store.get(capital_key("b", "paper")) is None  # paper and live measured apart
+
+
+def test_run_without_weights_alerts_once(tmp_path, monkeypatch):
+    # the session's own "no weights file" alert is enough: exit 0, so the scheduler stays quiet
+    from quant_hub.live import cli
+
+    book = tmp_path / "b.yaml"
+    book.write_text("book_id: b\n")
+    monkeypatch.setenv("LIVE_STORE", str(tmp_path / "store"))
+    monkeypatch.delenv("LIVE_BUCKET", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.setattr(cli, "make_adapter", lambda *a: FakeExchange(equity=800.0))
+    assert cli.main(["run", "--book", str(book), "--date", "2026-10-28"]) == 0
+    state = json.loads(cli.make_store().get(state_key("b", "2026-10-28")))
+    assert state["status"] == "no_weights"
