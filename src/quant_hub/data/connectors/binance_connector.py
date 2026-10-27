@@ -80,8 +80,12 @@ def _to_utc(series: pd.Series) -> pd.Series:
 
 
 def _parse_klines(content: bytes, symbol: str) -> pd.DataFrame:
-    df = _read_zipped_csv(content, names=KLINE_COLS)
-    out = pd.DataFrame({"ts": _to_utc(df["open_time"])})
+    return _klines_frame(_read_zipped_csv(content, names=KLINE_COLS), symbol)
+
+
+def _klines_frame(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Dump rows and REST rows share the column order of KLINE_COLS."""
+    out = pd.DataFrame({"ts": _to_utc(pd.to_numeric(df["open_time"]))})
     for col in [
         "open",
         "high",
@@ -110,6 +114,35 @@ def fetch_klines_day(symbol: str, interval: str, day: date) -> pd.DataFrame | No
     base = f"{VISION}/futures/um/daily/klines/{symbol}/{interval}"
     resp = _get(f"{base}/{symbol}-{interval}-{day.isoformat()}.zip")
     return _parse_klines(resp.content, symbol) if resp else None
+
+
+def fetch_klines_rest(symbol: str, interval: str, start: date, end: date) -> pd.DataFrame:
+    """Closed klines from REST (fapi) for the days start..end inclusive.
+
+    The daily dump of day d appears on data.binance.vision only at ~08:45-09:50 UTC of
+    d+1 and the monthly dump days into the next month, so the bars a 09:00 decision needs
+    can be missing from the dumps; REST has them right after the bar closes. Geo-blocked
+    (451) from some regions: callers treat an error as "not available here".
+    """
+    start_ms = int(datetime.combine(start, datetime.min.time(), tzinfo=UTC).timestamp() * 1000)
+    end_ms = int(datetime.combine(end, datetime.max.time(), tzinfo=UTC).timestamp() * 1000)
+    resp = _get(
+        f"{FAPI}/klines",
+        params={
+            "symbol": symbol,
+            "interval": interval,
+            "startTime": start_ms,
+            "endTime": end_ms,
+            "limit": 99,  # request weight 1 below 100 bars; callers ask for at most a month
+        },
+    )
+    rows = resp.json() if resp else []
+    if not rows:
+        return pd.DataFrame(columns=["ts"])
+    df = pd.DataFrame(rows, columns=KLINE_COLS)
+    now_ms = datetime.now(UTC).timestamp() * 1000
+    df = df[pd.to_numeric(df["close_time"]) < now_ms]  # never store the bar still forming
+    return _klines_frame(df, symbol) if len(df) else pd.DataFrame(columns=["ts"])
 
 
 def fetch_metrics_day(symbol: str, day: date) -> pd.DataFrame | None:

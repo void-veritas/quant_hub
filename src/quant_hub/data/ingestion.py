@@ -111,7 +111,38 @@ def _ohlcv_binance_1d(inst: pd.DataFrame, start: date, end: date) -> None:
                 if df is not None:
                     storage.write_partition(df, "ohlcv_1d", "binance", asset)
                     n += len(df)
+        n += _fill_binance_1d_rest(asset, symbol, start, daily_cutoff)
         print(f"ohlcv(1d) binance {asset:12s} +{n} rows", flush=True)
+
+
+REST_FILL_DAYS = 31  # REST only tops up recent days; history comes from the dumps
+
+
+def _fill_binance_1d_rest(asset: str, symbol: str, start: date, end: date) -> int:
+    """Fill from REST the recent days the dumps do not have yet.
+
+    That is yesterday before ~09:00 UTC and the end of last month before its monthly
+    dump. Skipped (with a log line) where fapi is blocked.
+    """
+    first = max(start, end - timedelta(days=REST_FILL_DAYS - 1))
+    if first > end:
+        return 0
+    have = {t.date() for t in _existing_ts("ohlcv_1d", "binance", asset)}
+    missing = [d for d in bnc.day_range(first, end) if d not in have]
+    if not missing:
+        return 0
+    try:
+        df = bnc.fetch_klines_rest(symbol, "1d", missing[0], missing[-1])
+    except Exception as err:  # noqa: BLE001 (451 geo-block, network): the dumps stay the source
+        print(f"ohlcv(1d) binance {asset:12s} REST unavailable: {type(err).__name__}", flush=True)
+        return 0
+    if df.empty:
+        return 0
+    df = df[df["ts"].dt.date.isin(set(missing))]
+    if df.empty:
+        return 0
+    storage.write_partition(df, "ohlcv_1d", "binance", asset, root=storage.RAW_ROOT)
+    return len(df)
 
 
 def _ohlcv_binance(inst: pd.DataFrame, start: date, end: date) -> None:

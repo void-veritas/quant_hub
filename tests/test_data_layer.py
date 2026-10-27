@@ -369,3 +369,54 @@ def test_cross_venue_flags_mismatched_instruments(tmp_path):
     cv = health.cross_venue(root=tmp_path).set_index("asset")
     assert not cv.loc["BTC", "flagged"] and cv.loc["BTC", "off_days"] == 0
     assert cv.loc["FTT", "flagged"] and cv.loc["FTT", "off_share"] == 1.0
+
+
+def test_binance_1d_rest_fills_what_the_dumps_lack(tmp_path, monkeypatch):
+    """REST fills yesterday's bar before its dump exists; a blocked REST changes nothing.
+
+    The daily dump appears only at ~09:00 UTC; fapi answers 451 from some regions.
+    """
+    from datetime import date
+
+    from quant_hub.data import ingestion
+    from quant_hub.data.connectors import binance_connector as bnc
+
+    monkeypatch.setattr(storage, "RAW_ROOT", tmp_path)
+    monkeypatch.setattr(bnc, "utc_today", lambda: date(2026, 10, 27))
+    monkeypatch.setattr(bnc, "fetch_klines_day", lambda *a, **k: None)  # dump not out yet
+    asked = []
+
+    def rest(symbol, interval, start, end):
+        asked.append((start, end))
+        ts = pd.date_range("2026-10-25", "2026-10-26", freq="1D", tz="UTC")
+        return pd.DataFrame(
+            {
+                "ts": ts,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 1.0,
+                "quote_volume": 1.0,
+                "taker_buy_volume": 0.5,
+                "taker_buy_quote_volume": 0.5,
+                "trades": 1,
+                "symbol": symbol,
+            }
+        )
+
+    monkeypatch.setattr(bnc, "fetch_klines_rest", rest)
+    inst = pd.DataFrame({"canonical_id": ["BTC"], "symbol": ["BTCUSDT"]})
+    ingestion._ohlcv_binance_1d(inst, date(2026, 10, 25), date(2026, 10, 27))
+    got = ingestion._existing_ts("ohlcv_1d", "binance", "BTC")
+    assert [t.date() for t in got] == [date(2026, 10, 25), date(2026, 10, 26)]
+    assert asked == [(date(2026, 10, 25), date(2026, 10, 26))]  # never today's open bar
+    ingestion._ohlcv_binance_1d(inst, date(2026, 10, 25), date(2026, 10, 27))
+    assert len(asked) == 1  # nothing missing: no REST call
+
+    def blocked(*a, **k):
+        raise RuntimeError("451")
+
+    monkeypatch.setattr(bnc, "fetch_klines_rest", blocked)
+    inst2 = pd.DataFrame({"canonical_id": ["ETH"], "symbol": ["ETHUSDT"]})
+    ingestion._ohlcv_binance_1d(inst2, date(2026, 10, 25), date(2026, 10, 27))  # no exception
