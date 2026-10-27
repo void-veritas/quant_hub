@@ -55,6 +55,14 @@ def signing_vault(account: str, account_role: dict, agent: str, agent_role: dict
     return vault
 
 
+def agent_expiry(agents: list[dict], agent: str) -> int | None:
+    """``validUntil`` (ms) of our API wallet in the owner's ``extraAgents`` list, if listed."""
+    for a in agents:
+        if str(a.get("address", "")).lower() == agent.lower() and a.get("validUntil"):
+            return int(a["validUntil"])
+    return None
+
+
 def parse_ledger(rows: list[dict], me: str) -> tuple[list[tuple[int, float, str]], list[str]]:
     """External cash flows of the perp account ``me`` from ``userNonFundingLedgerUpdates``.
 
@@ -203,12 +211,15 @@ class HyperliquidAdapter:
             from hyperliquid.exchange import Exchange
 
             wallet = Account.from_key(self._key)
+            agent_role = self.info.post("/info", {"type": "userRole", "user": wallet.address})
             vault = signing_vault(
                 self.address,
                 self.info.post("/info", {"type": "userRole", "user": self.address}),
                 wallet.address,
-                self.info.post("/info", {"type": "userRole", "user": wallet.address}),
+                agent_role,
             )
+            self._agent = wallet.address
+            self._agent_owner = str((agent_role.get("data") or {}).get("user", ""))
             self.exchange = Exchange(
                 wallet, self.base_url, meta=meta, vault_address=vault, account_address=self.address
             )
@@ -307,6 +318,21 @@ class HyperliquidAdapter:
             {"type": "userNonFundingLedgerUpdates", "user": self.address, "startTime": start_ms},
         )
         return parse_ledger(rows or [], self.address)
+
+    async def health(self) -> dict:
+        """Margin in use (share of account value) and the API wallet's expiry (live only)."""
+        state = await asyncio.to_thread(self.info.user_state, self.address)
+        ms = state.get("marginSummary", {})
+        value = float(ms.get("accountValue", 0) or 0)
+        used = float(ms.get("totalMarginUsed", 0) or 0)
+        out = {"margin_used": used / value if value > 0 else 0.0, "agent_valid_until_ms": None}
+        owner = getattr(self, "_agent_owner", "")
+        if owner:
+            agents = await asyncio.to_thread(
+                self.info.post, "/info", {"type": "extraAgents", "user": owner}
+            )
+            out["agent_valid_until_ms"] = agent_expiry(agents or [], self._agent)
+        return out
 
     async def fills_since(self, start_ms: int) -> list[Event]:
         raw = await asyncio.to_thread(self.info.user_fills_by_time, self.address, start_ms)

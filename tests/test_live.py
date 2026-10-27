@@ -844,3 +844,26 @@ def test_riskwatch_counts_deposits_and_withdrawals_as_capital(tmp_path, monkeypa
     assert BookRisk.from_json(store.get(capital_key("b", "live"))).start == 700.0
     acc["equity"] = 610.0  # a real -90 = -12.9% of the 700 start
     assert cli.main(argv) == 0 and store.exists(pause_key("b"))
+
+
+def test_margin_and_key_expiry_alert_once_a_day():
+    from quant_hub.live.adapters.hyperliquid import agent_expiry
+    from quant_hub.live.riskwatch import DayRisk, evaluate_health
+
+    agents = [
+        {"name": "x", "address": "0xOther", "validUntil": 5},
+        {"address": "0xAb", "validUntil": 10**13},
+    ]
+    assert agent_expiry(agents, "0xab") == 10**13 and agent_expiry(agents, "0xcd") is None
+    day = DayRisk(800.0)
+    now = 10**13 - 3 * 86_400_000  # three days left
+    lines = evaluate_health({"margin_used": 0.6, "agent_valid_until_ms": 10**13}, day, now)
+    assert len(lines) == 2 and "margin" in lines[0] and "3.0 days" in lines[1]
+    assert evaluate_health({"margin_used": 0.7, "agent_valid_until_ms": 10**13}, day, now) == []
+    assert (
+        evaluate_health(
+            {"margin_used": 0.1, "agent_valid_until_ms": now + 30 * 86_400_000}, DayRisk(1.0), now
+        )
+        == []
+    )
+    assert evaluate_health({}, DayRisk(1.0), now) == []  # paper: nothing to check

@@ -165,6 +165,7 @@ def cmd_riskwatch(args) -> int:
         capital_key,
         evaluate,
         evaluate_book,
+        evaluate_health,
         risk_key,
     )
 
@@ -185,11 +186,13 @@ def cmd_riskwatch(args) -> int:
             account = (await adapter.snapshot()) if quotes else first
             ledger = getattr(adapter, "capital_flows", None)  # live only: paper has no deposits
             flows = await ledger(cap.since_ms) if ledger and cap else ([], [])
-            return account, {c: q.mid for c, q in quotes.items()}, flows
+            check = getattr(adapter, "health", None)  # live only
+            health = await check() if check else {}
+            return account, {c: q.mid for c, q in quotes.items()}, flows, health
         finally:
             await adapter.close()
 
-    account, mids, (flows, unknown) = asyncio.run(snap())
+    account, mids, (flows, unknown), health = asyncio.run(snap())
     key = risk_key(book.book_id, args.date)
     raw = store.get(key)
     day = DayRisk.from_json(raw) if raw else DayRisk(account.equity)
@@ -201,6 +204,7 @@ def cmd_riskwatch(args) -> int:
     alerts = evaluate(
         account.equity, account.positions, mids, day, book.max_abs_weight, book.max_gross
     )
+    alerts += evaluate_health(health, day, now_ms)
     store.put(key, day.to_json())
     book_alerts, stop = evaluate_book(
         account.equity, cap, book.review_drawdown, book.pause_drawdown

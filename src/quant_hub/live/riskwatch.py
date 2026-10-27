@@ -8,6 +8,8 @@ looking; this check reads the account once an hour and tells the owner when:
   per level per day, so a slow bleed does not flood the chat);
 - a coin's weight has drifted past 1.5x the passport clamp (a price move made it big);
 - gross exposure is above 1.2x the passport's max_gross;
+- (live) margin in use is above half the account value, or the API wallet expires
+  within 14 days (once a day each: an expired key stops every session);
 - the book's drawdown from its equity peak, in units of the starting capital, reaches the
   passport's ``review_drawdown`` (an alert) or ``pause_drawdown`` (an alert and the pause
   flag: no session runs until ``resume``). The start is the equity at the first check in
@@ -28,6 +30,8 @@ from dataclasses import dataclass, field
 DAY_LEVELS = (0.02, 0.03, 0.05)
 WEIGHT_X = 1.5  # x max_abs_weight
 GROSS_X = 1.2  # x max_gross
+MARGIN_MAX = 0.5  # share of account value in use as margin
+AGENT_WARN_DAYS = 14
 
 
 def risk_key(book_id: str, as_of: str) -> str:
@@ -157,3 +161,21 @@ def evaluate_book(
         out.append(f"{where}: past the {review:.0%} review level, look at it")
         book.alerted.add("review")
     return out, stop
+
+
+def evaluate_health(health: dict, day: DayRisk, now_ms: int) -> list[str]:
+    """Margin and key expiry lines, each once per day."""
+    out = []
+    m = health.get("margin_used")
+    if m is not None and m > MARGIN_MAX and "margin" not in day.alerted:
+        out.append(f"margin in use {m:.0%} of account value > {MARGIN_MAX:.0%}")
+        day.alerted.add("margin")
+    until = health.get("agent_valid_until_ms")
+    if until is not None and "agent" not in day.alerted:
+        days = (until - now_ms) / 86_400_000
+        if days < AGENT_WARN_DAYS:
+            out.append(
+                f"API wallet expires in {days:.1f} days: renew it in the HL app (More -> API)"
+            )
+            day.alerted.add("agent")
+    return out
