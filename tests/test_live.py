@@ -668,3 +668,52 @@ def test_sub_account_orders_are_signed_with_its_vault_address():
     for args in bad:
         with pytest.raises(ValueError):
             signing_vault(*args)
+
+
+def test_book_drawdown_review_then_pause_once_until_a_new_peak():
+    from quant_hub.live.riskwatch import BookRisk, evaluate_book
+
+    b = BookRisk(800.0, 800.0)
+    assert evaluate_book(900.0, b, 0.08, 0.12) == ([], False) and b.peak == 900.0
+    alerts, stop = evaluate_book(830.0, b, 0.08, 0.12)  # -70 = -8.75% of the 800 start
+    assert len(alerts) == 1 and "review" in alerts[0] and not stop
+    assert evaluate_book(825.0, b, 0.08, 0.12) == ([], False)  # once per level
+    alerts, stop = evaluate_book(800.0, b, 0.08, 0.12)  # -100 = -12.5%
+    assert stop and "pause flag set" in alerts[0]
+    assert evaluate_book(790.0, b, 0.08, 0.12) == ([], False)
+    assert evaluate_book(901.0, b, 0.08, 0.12) == ([], False) and b.alerted == set()  # re-armed
+    assert evaluate_book(100.0, BookRisk(800.0, 800.0), None, None) == ([], False)
+    assert BookRisk.from_json(b.to_json()) == b
+
+
+def test_riskwatch_pauses_the_book_past_its_pause_level(tmp_path, monkeypatch):
+    from quant_hub.live import cli
+    from quant_hub.live.adapters.base import AccountSnapshot
+    from quant_hub.live.riskwatch import BookRisk, capital_key
+
+    book = tmp_path / "b.yaml"
+    book.write_text("book_id: b\nreview_drawdown: 0.08\npause_drawdown: 0.12\n")
+    monkeypatch.setenv("LIVE_STORE", str(tmp_path / "store"))
+    monkeypatch.delenv("LIVE_BUCKET", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    equity = {"v": 1000.0}
+
+    class Acc:
+        async def connect(self):
+            pass
+
+        async def close(self):
+            pass
+
+        async def snapshot(self):
+            return AccountSnapshot(equity["v"], {}, [], "")
+
+    monkeypatch.setattr(cli, "make_adapter", lambda *a: Acc())
+    argv = ["riskwatch", "--book", str(book), "--mode", "live", "--date", "2026-10-29"]
+    assert cli.main(argv) == 0
+    store = cli.make_store()
+    assert BookRisk.from_json(store.get(capital_key("b", "live"))).start == 1000.0
+    assert not store.exists(pause_key("b"))
+    equity["v"] = 870.0
+    assert cli.main(argv) == 0 and store.exists(pause_key("b"))
+    assert store.get(capital_key("b", "paper")) is None  # paper and live measured apart

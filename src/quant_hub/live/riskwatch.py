@@ -7,7 +7,11 @@ looking; this check reads the account once an hour and tells the owner when:
 - equity has fallen 2%, 3% or 5% since the first check of the UTC day (one message
   per level per day, so a slow bleed does not flood the chat);
 - a coin's weight has drifted past 1.5x the passport clamp (a price move made it big);
-- gross exposure is above 1.2x the passport's max_gross.
+- gross exposure is above 1.2x the passport's max_gross;
+- the book's drawdown from its equity peak, in units of the starting capital, reaches the
+  passport's ``review_drawdown`` (an alert) or ``pause_drawdown`` (an alert and the pause
+  flag: no session runs until ``resume``). The start is the equity at the first check in
+  that mode, so paper and live are measured separately and going live starts from zero.
 
 Anything below these levels belongs in the daily report, not in an alert.
 """
@@ -70,3 +74,49 @@ def evaluate(
             out.append(f"{coin} weight {w:+.2f} > {WEIGHT_X:g} x clamp {max_abs_weight:g}")
             day.alerted.add(f"w:{coin}")
     return out
+
+
+def capital_key(book_id: str, mode: str) -> str:
+    return f"state/{book_id}/capital_{mode}.json"
+
+
+@dataclass
+class BookRisk:
+    start: float  # equity at the first check in this mode (delete the file after a deposit)
+    peak: float
+    alerted: set[str] = field(default_factory=set)
+
+    def to_json(self) -> str:
+        return json.dumps({"start": self.start, "peak": self.peak, "alerted": sorted(self.alerted)})
+
+    @classmethod
+    def from_json(cls, raw: bytes | str) -> BookRisk:
+        d = json.loads(raw)
+        return cls(float(d["start"]), float(d["peak"]), set(d.get("alerted", [])))
+
+
+def evaluate_book(
+    equity: float, book: BookRisk, review: float | None, pause: float | None
+) -> tuple[list[str], bool]:
+    """(alert lines, set the pause flag). Each level fires once until a new equity peak."""
+    if equity >= book.peak:
+        book.peak = equity
+        book.alerted.clear()
+    if book.start <= 0:
+        return [], False
+    dd = (equity - book.peak) / book.start
+    out, stop = [], False
+    where = (
+        f"drawdown {dd:+.1%} of starting capital {book.start:.0f}"
+        f" (peak {book.peak:.0f}, now {equity:.0f})"
+    )
+    if pause is not None and dd <= -pause and "pause" not in book.alerted:
+        out.append(
+            f"{where}: past the {pause:.0%} pause level, pause flag set, no session until resume"
+        )
+        book.alerted.update({"pause", "review"})
+        stop = True
+    elif review is not None and dd <= -review and "review" not in book.alerted:
+        out.append(f"{where}: past the {review:.0%} review level, look at it")
+        book.alerted.add("review")
+    return out, stop

@@ -157,7 +157,14 @@ def cmd_cancel_all(args) -> int:
 
 def cmd_riskwatch(args) -> int:
     """One hourly risk check (alerts only); inside the window the session itself guards."""
-    from quant_hub.live.riskwatch import DayRisk, evaluate, risk_key
+    from quant_hub.live.riskwatch import (
+        BookRisk,
+        DayRisk,
+        capital_key,
+        evaluate,
+        evaluate_book,
+        risk_key,
+    )
 
     book = Book.from_yaml(args.book)
     store = make_store()
@@ -183,11 +190,30 @@ def cmd_riskwatch(args) -> int:
         account.equity, account.positions, mids, day, book.max_abs_weight, book.max_gross
     )
     store.put(key, day.to_json())
-    print(json.dumps({"equity": account.equity, "baseline": day.baseline, "alerts": alerts}))
-    if alerts:
-        asyncio.run(
-            make_notifier().send("warning", f"{book.book_id}: risk check", "\n".join(alerts))
+    ckey = capital_key(book.book_id, args.mode)
+    raw = store.get(ckey)
+    cap = BookRisk.from_json(raw) if raw else BookRisk(account.equity, account.equity)
+    book_alerts, stop = evaluate_book(
+        account.equity, cap, book.review_drawdown, book.pause_drawdown
+    )
+    store.put(ckey, cap.to_json())
+    if stop:
+        store.put(pause_key(book.book_id), datetime.now(UTC).isoformat())
+    alerts += book_alerts
+    print(
+        json.dumps(
+            {
+                "equity": account.equity,
+                "baseline": day.baseline,
+                "start": cap.start,
+                "peak": cap.peak,
+                "alerts": alerts,
+            }
         )
+    )
+    if alerts:
+        level = "critical" if stop else "warning"
+        asyncio.run(make_notifier().send(level, f"{book.book_id}: risk check", "\n".join(alerts)))
     return 0
 
 

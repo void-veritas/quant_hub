@@ -39,6 +39,10 @@ class Book:
     universe: list[str] | None = None  # whitelist; None = any coin the venue lists
     weights_max_age_minutes: int = 30  # produced_at must be within this of the window start
     daily_loss_limit: float = 0.03  # equity drawdown within the session that halts the book
+    # book drawdown from its equity peak, in units of the starting capital (riskwatch, hourly):
+    # an alert at review_drawdown, the pause flag at pause_drawdown; None = not checked
+    review_drawdown: float | None = None
+    pause_drawdown: float | None = None
     max_order_notional: float = 2_000.0  # single order cap in quote currency
     imbalance_guard: float = (
         0.10  # cross the lagging side when |net filled - net planned| > this * gross
