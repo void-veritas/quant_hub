@@ -323,6 +323,7 @@ class Session:
                 self.equity,
                 pos.get(it.coin, 0.0),
                 self.targets.get(it.coin, 0.0),
+                reduce_only=it.reduce_only,
             )
             if why:
                 self.risk.state.rejected.append(f"{it.coin} {it.side} {it.size}@{it.price}: {why}")
@@ -336,7 +337,9 @@ class Session:
                     why=why,
                 )
                 continue
-            o = self.oms.new_order(it.coin, it.side, it.size, it.price, it.tif, self.clock.now())
+            o = self.oms.new_order(
+                it.coin, it.side, it.size, it.price, it.tif, self.clock.now(), it.reduce_only
+            )
             self._persist()  # the cloid is on disk before the venue sees it
             res = await self.adapter.place(o)
             if not res.ok:

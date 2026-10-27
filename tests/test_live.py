@@ -867,3 +867,30 @@ def test_margin_and_key_expiry_alert_once_a_day():
         == []
     )
     assert evaluate_health({}, DayRisk(1.0), now) == []  # paper: nothing to check
+
+
+def test_full_close_below_minimum_goes_reduce_only(tmp_path):
+    # a $5 position whose target is 0 is closed reduce-only (exempt from the $10 minimum, as in the
+    # backtest); a $5 trade that does not close the position is still left as dust
+    from quant_hub.live.risk import RiskController
+
+    bk = book()
+    pol = RebalancePolicy(bk, DECIMALS)
+    q = {"BTC": QUOTES["BTC"]}
+    dust = round_size(5.0 / q["BTC"].mid, DECIMALS["BTC"])
+    window = (START + timedelta(seconds=10), START, START + timedelta(hours=1))
+
+    def step(target, pos):
+        return pol.step(*window, {"BTC": target}, {"BTC": pos}, q, OMS("b", AS_OF), {}, 0.0, 1.0)
+
+    close = step(0.0, dust).send
+    assert len(close) == 1 and close[0].reduce_only and close[0].side == "sell"
+    assert close[0].size == dust and close[0].tif == "Alo"
+    assert step(dust, 2 * dust).send == []  # a partial reduction below $10 stays dust
+    risk = RiskController(bk, Store(tmp_path), 1000.0)
+    it = close[0]
+    assert (
+        risk.check_order("BTC", "sell", it.size, it.price, 1000.0, dust, 0.0, reduce_only=True)
+        is None
+    )
+    assert risk.check_order("BTC", "sell", it.size, it.price, 1000.0, dust, 0.0) is not None

@@ -79,6 +79,7 @@ class RiskController:
         equity: float,
         position: float,
         target: float,
+        reduce_only: bool = False,
     ) -> str | None:
         """Reject reason for an order, or None if it may be sent.
 
@@ -90,7 +91,8 @@ class RiskController:
         notional = size * price
         if notional > self.book.max_order_notional:
             return f"order notional {notional:.0f} > {self.book.max_order_notional:.0f}"
-        if notional < self.book.min_notional * (1 - 1e-9):
+        full_close = reduce_only and target == 0 and abs(size - abs(position)) <= 1e-12
+        if notional < self.book.min_notional * (1 - 1e-9) and not full_close:
             return f"order notional {notional:.2f} < venue minimum {self.book.min_notional}"
         signed = size if side == "buy" else -size
         gap = target - position

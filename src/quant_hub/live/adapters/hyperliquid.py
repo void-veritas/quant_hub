@@ -351,7 +351,7 @@ class HyperliquidAdapter:
             order.size,
             order.price,
             {"limit": {"tif": order.tif}},
-            False,
+            order.reduce_only,
             Cloid(order.cloid),
         )
         return parse_place_response(resp)

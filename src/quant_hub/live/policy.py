@@ -37,6 +37,7 @@ class Intent:
     size: float
     price: float
     tif: str  # Alo | Ioc
+    reduce_only: bool = False  # a full close below the venue minimum (exempt when reduce-only)
 
 
 @dataclass(frozen=True)
@@ -143,9 +144,14 @@ class RebalancePolicy:
                 px = aggressive_price(q, side, dec)
             else:
                 px = passive_price(q, side, dec)
+            tif = "Ioc" if want_aggressive else "Alo"
             if residual * px < self.book.min_notional:
-                continue  # below the venue minimum: leave the dust (buffering lives in analytics)
-            send.append(Intent(coin, side, residual, px, "Ioc" if want_aggressive else "Alo"))
+                # a full close may go below the minimum as reduce-only (the backtest assumes the
+                # same, note 011); anything else below it is left as dust
+                if target == 0 and pos != 0 and keep_resting == 0 and residual >= abs(pos) - 1e-12:
+                    send.append(Intent(coin, side, residual, px, tif, reduce_only=True))
+                continue
+            send.append(Intent(coin, side, residual, px, tif))
         return Plan(cancel=cancel, send=send, phase=phase)
 
     def _imbalance_cross(

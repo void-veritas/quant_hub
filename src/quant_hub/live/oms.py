@@ -43,6 +43,7 @@ class Order:
     notional_filled: float = 0.0
     fees: float = 0.0
     reason: str = ""
+    reduce_only: bool = False
 
     @property
     def remaining(self) -> float:
@@ -69,7 +70,14 @@ class OMS:
 
     # --- creation -----------------------------------------------------------------
     def new_order(
-        self, coin: str, side: str, size: float, price: float, tif: str, now: datetime
+        self,
+        coin: str,
+        side: str,
+        size: float,
+        price: float,
+        tif: str,
+        now: datetime,
+        reduce_only: bool = False,
     ) -> Order:
         n = self.seq.get(coin, 0) + 1
         self.seq[coin] = n
@@ -81,6 +89,7 @@ class OMS:
             price,
             tif,
             now.isoformat(),
+            reduce_only=reduce_only,
         )
         self.orders[o.cloid] = o
         return o
