@@ -7,7 +7,9 @@
     python -m quant_hub.live pause|resume|kill|unkill --book ...           (flags in the store)
 
 Store root and bucket come from ``LIVE_STORE`` and ``LIVE_BUCKET``; paper equity from
-``PAPER_EQUITY``. Telegram alerts are enabled when ``TELEGRAM_BOT_TOKEN`` is set.
+``PAPER_EQUITY``. Without ``--mode`` the mode comes from ``MODE`` (default paper), so each
+executor container takes it from its own env file and two books on one server cannot share it.
+Telegram alerts are enabled when ``TELEGRAM_BOT_TOKEN`` is set.
 """
 
 from __future__ import annotations
@@ -189,7 +191,7 @@ def cmd_riskwatch(args) -> int:
     return 0
 
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="quant_hub.live")
     sub = ap.add_subparsers(dest="cmd", required=True)
     today = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -208,8 +210,15 @@ def main(argv=None) -> int:
         p.add_argument("--book", required=name not in ("kill", "unkill"))
         p.add_argument("--date", default=today)
         if name in ("run", "riskwatch"):
-            p.add_argument("--mode", choices=["paper", "live"], default="paper")
-    args = ap.parse_args(argv)
+            # argparse does not check a default against choices: make_adapter rejects a typo
+            p.add_argument(
+                "--mode", choices=["paper", "live"], default=os.environ.get("MODE", "paper")
+            )
+    return ap
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
     return {
         "run": cmd_run,
         "validate": cmd_validate,

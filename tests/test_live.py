@@ -634,3 +634,14 @@ def test_riskwatch_alerts_once_per_level_and_per_coin():
     assert any(m.startswith("gross") for m in lev) and any(m.startswith("ETH") for m in lev)
     again = DayRisk.from_json(day.to_json())
     assert again.baseline == 1000.0 and again.alerted == day.alerted
+
+
+def test_mode_comes_from_the_container_env(monkeypatch):
+    # two executors on one server: each takes paper/live from its own env file, not the shell
+    from quant_hub.live.cli import build_parser
+
+    monkeypatch.delenv("MODE", raising=False)
+    assert build_parser().parse_args(["run", "--book", "b.yaml"]).mode == "paper"
+    monkeypatch.setenv("MODE", "live")
+    assert build_parser().parse_args(["riskwatch", "--book", "b.yaml"]).mode == "live"
+    assert build_parser().parse_args(["run", "--book", "b.yaml", "--mode", "paper"]).mode == "paper"
