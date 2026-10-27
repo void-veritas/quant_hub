@@ -645,3 +645,26 @@ def test_mode_comes_from_the_container_env(monkeypatch):
     monkeypatch.setenv("MODE", "live")
     assert build_parser().parse_args(["riskwatch", "--book", "b.yaml"]).mode == "live"
     assert build_parser().parse_args(["run", "--book", "b.yaml", "--mode", "paper"]).mode == "paper"
+
+
+def test_sub_account_orders_are_signed_with_its_vault_address():
+    # without vaultAddress the master's API wallet would trade the master account, while the
+    # session reads the sub-account's positions: refuse every combination but the two valid ones
+    from quant_hub.live.adapters.hyperliquid import signing_vault
+
+    main, sub, agent, other = "0xAa", "0xBb", "0xCc", "0xDd"
+    approved_by_main = {"role": "agent", "data": {"user": main.lower()}}
+    assert signing_vault(main, {"role": "user"}, agent, approved_by_main) is None
+    sub_role = {"role": "subAccount", "data": {"master": main}}
+    assert signing_vault(sub, sub_role, agent, approved_by_main) == sub
+    bad = [
+        (sub, sub_role, agent, {"role": "agent", "data": {"user": other}}),  # someone else's agent
+        (main, {"role": "user"}, agent, {"role": "missing"}),  # not approved (or revoked)
+        (main, {"role": "user"}, main, {"role": "user"}),  # the main wallet key itself
+        (sub, sub_role, main, {"role": "user"}),
+        ("0xEe", {"role": "vault"}, agent, approved_by_main),
+        (sub, {"role": "subAccount"}, agent, approved_by_main),  # master unknown
+    ]
+    for args in bad:
+        with pytest.raises(ValueError):
+            signing_vault(*args)

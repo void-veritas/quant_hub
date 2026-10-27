@@ -1,10 +1,14 @@
 """Hyperliquid adapter on the official SDK.
 
-Credentials: ``HL_ACCOUNT_ADDRESS`` (the account whose positions are traded) and
-``HL_AGENT_PRIVATE_KEY`` (an API/agent wallet approved for trading only; it cannot
-withdraw). REST (``Info``) is the source of truth; the websocket feeds ``orderUpdates``
-and ``userFills`` into the event queue as a hint. Orders carry our ``cloid`` so the
-venue's records can always be matched to the OMS. Nothing here reads the main wallet.
+Credentials: ``HL_ACCOUNT_ADDRESS`` (the account whose positions are traded: a main
+account or one of its sub-accounts) and ``HL_AGENT_PRIVATE_KEY`` (an API/agent wallet
+approved for trading only; it cannot withdraw). A sub-account has no key of its own: its
+orders are signed by its master's API wallet with ``vaultAddress`` set, otherwise they land
+on the master account. ``signing_vault`` decides this from the venue's ``userRole`` at
+connect and refuses any other combination. REST (``Info``) is the source of truth; the
+websocket feeds ``orderUpdates`` and ``userFills`` into the event queue as a hint. Orders
+carry our ``cloid`` so the venue's records can always be matched to the OMS. Nothing here
+reads the main wallet.
 """
 
 from __future__ import annotations
@@ -25,6 +29,30 @@ TESTNET = "https://api.hyperliquid-testnet.xyz"
 
 def _ms_to_dt(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=UTC)
+
+
+def signing_vault(account: str, account_role: dict, agent: str, agent_role: dict) -> str | None:
+    """``vaultAddress`` for orders on ``account`` signed by ``agent``, or ValueError.
+
+    Roles are the venue's ``userRole`` answers. A main account ("user") is traded by an
+    agent it approved; a sub-account by an agent its master approved, with the
+    sub-account as vault. The main wallet key itself is refused (RUNBOOK: never on the VPS).
+    """
+    a = account.lower()
+    if account_role.get("role") == "user":
+        owner, vault = a, None
+    elif account_role.get("role") == "subAccount":
+        owner, vault = str((account_role.get("data") or {}).get("master", "")).lower(), account
+    else:
+        raise ValueError(f"{account} is a {account_role.get('role')!r} account: cannot trade it")
+    if agent.lower() in (a, owner):
+        raise ValueError("HL_AGENT_PRIVATE_KEY is the account's own key, use an API wallet")
+    if agent_role.get("role") != "agent":
+        raise ValueError(f"{agent} is not an approved API wallet (role {agent_role.get('role')!r})")
+    approved_by = str((agent_role.get("data") or {}).get("user", "")).lower()
+    if not owner or approved_by != owner:
+        raise ValueError(f"API wallet {agent} is approved by {approved_by}, not by {owner or a}")
+    return vault
 
 
 def parse_fill(raw: dict) -> Fill | None:
@@ -135,7 +163,15 @@ class HyperliquidAdapter:
             from hyperliquid.exchange import Exchange
 
             wallet = Account.from_key(self._key)
-            self.exchange = Exchange(wallet, self.base_url, meta=meta, account_address=self.address)
+            vault = signing_vault(
+                self.address,
+                self.info.post("/info", {"type": "userRole", "user": self.address}),
+                wallet.address,
+                self.info.post("/info", {"type": "userRole", "user": wallet.address}),
+            )
+            self.exchange = Exchange(
+                wallet, self.base_url, meta=meta, vault_address=vault, account_address=self.address
+            )
         self.info.subscribe({"type": "orderUpdates", "user": self.address}, self._on_order_updates)
         self.info.subscribe({"type": "userFills", "user": self.address}, self._on_user_fills)
         self.connected = True
