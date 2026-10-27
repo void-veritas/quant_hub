@@ -1,8 +1,11 @@
 name: ci
 on:
+  # main only: work branches are fast-forwarded into main with the same commit, so a push
+  # to both ran every check twice (and mailed every failure twice); PRs are still checked
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
