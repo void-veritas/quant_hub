@@ -614,3 +614,23 @@ def test_store_mirror_uploads_without_rewriting(tmp_path):
         == b'{"msg": "session started"}\n'
     )
     assert Store(tmp_path / "local").mirror("logs/x.jsonl") is False  # no bucket: nothing to do
+
+
+def test_riskwatch_alerts_once_per_level_and_per_coin():
+    from quant_hub.live.riskwatch import DayRisk, evaluate
+
+    day = DayRisk(baseline=1000.0)
+    mids = {"BTC": 100_000.0, "ETH": 4_000.0}
+    calm = evaluate(990.0, {"BTC": 0.002, "ETH": -0.05}, mids, day, 0.25, 1.5)
+    assert calm == []  # -1%, weights 0.20 / -0.20, gross 0.40
+    bad = evaluate(965.0, {"BTC": 0.002, "ETH": -0.05}, mids, day, 0.25, 1.5)
+    assert len(bad) == 1 and "-3.5%" in bad[0]  # crosses -2% and -3% in one message
+    assert evaluate(962.0, {"BTC": 0.002, "ETH": -0.05}, mids, day, 0.25, 1.5) == []  # no repeat
+    worse = evaluate(940.0, {"BTC": 0.002, "ETH": -0.05}, mids, day, 0.25, 1.5)
+    assert len(worse) == 1 and "-6.0%" in worse[0]  # the -5% level, once
+    big = evaluate(940.0, {"BTC": 0.004, "ETH": -0.05}, mids, day, 0.25, 1.5)
+    assert big == ["BTC weight +0.43 > 1.5 x clamp 0.25"]
+    lev = evaluate(940.0, {"BTC": 0.004, "ETH": -0.35}, mids, day, 0.25, 1.5)  # gross 1.91
+    assert any(m.startswith("gross") for m in lev) and any(m.startswith("ETH") for m in lev)
+    again = DayRisk.from_json(day.to_json())
+    assert again.baseline == 1000.0 and again.alerted == day.alerted

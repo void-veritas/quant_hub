@@ -153,15 +153,61 @@ def cmd_cancel_all(args) -> int:
     return 0
 
 
+def cmd_riskwatch(args) -> int:
+    """One hourly risk check (alerts only); inside the window the session itself guards."""
+    from quant_hub.live.riskwatch import DayRisk, evaluate, risk_key
+
+    book = Book.from_yaml(args.book)
+    store = make_store()
+
+    async def snap():
+        adapter = make_adapter(book, args.mode, store)
+        await adapter.connect()
+        try:
+            first = await adapter.snapshot()
+            quotes = await adapter.quotes(sorted(first.positions)) if first.positions else {}
+            # paper equity marks to the quotes just loaded, so read the account again
+            return (await adapter.snapshot()) if quotes else first, {
+                c: q.mid for c, q in quotes.items()
+            }
+        finally:
+            await adapter.close()
+
+    account, mids = asyncio.run(snap())
+    key = risk_key(book.book_id, args.date)
+    raw = store.get(key)
+    day = DayRisk.from_json(raw) if raw else DayRisk(account.equity)
+    alerts = evaluate(
+        account.equity, account.positions, mids, day, book.max_abs_weight, book.max_gross
+    )
+    store.put(key, day.to_json())
+    print(json.dumps({"equity": account.equity, "baseline": day.baseline, "alerts": alerts}))
+    if alerts:
+        asyncio.run(
+            make_notifier().send("warning", f"{book.book_id}: risk check", "\n".join(alerts))
+        )
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="quant_hub.live")
     sub = ap.add_subparsers(dest="cmd", required=True)
     today = datetime.now(UTC).strftime("%Y-%m-%d")
-    for name in ("run", "validate", "status", "cancel-all", "pause", "resume", "kill", "unkill"):
+    for name in (
+        "run",
+        "validate",
+        "status",
+        "cancel-all",
+        "pause",
+        "resume",
+        "kill",
+        "unkill",
+        "riskwatch",
+    ):
         p = sub.add_parser(name)
         p.add_argument("--book", required=name not in ("kill", "unkill"))
         p.add_argument("--date", default=today)
-        if name == "run":
+        if name in ("run", "riskwatch"):
             p.add_argument("--mode", choices=["paper", "live"], default="paper")
     args = ap.parse_args(argv)
     return {
@@ -169,6 +215,7 @@ def main(argv=None) -> int:
         "validate": cmd_validate,
         "status": cmd_status,
         "cancel-all": cmd_cancel_all,
+        "riskwatch": cmd_riskwatch,
     }.get(args.cmd, cmd_flag)(args)
 
 
