@@ -13,6 +13,10 @@ looking; this check reads the account once an hour and tells the owner when:
   flag: no session runs until ``resume``). The start is the equity at the first check in
   that mode, so paper and live are measured separately and going live starts from zero.
 
+Deposits, withdrawals and transfers (live: the venue's ledger) are capital, not
+performance: each one moves the start, the peak and the day baseline by its amount, is
+recorded in the capital file and reported once, so performance = equity - start.
+
 Anything below these levels belongs in the daily report, not in an alert.
 """
 
@@ -82,17 +86,50 @@ def capital_key(book_id: str, mode: str) -> str:
 
 @dataclass
 class BookRisk:
-    start: float  # equity at the first check in this mode (delete the file after a deposit)
+    start: float  # equity at the first check in this mode, plus every external flow since
     peak: float
     alerted: set[str] = field(default_factory=set)
+    since_ms: int = 0  # ledger read up to here
+    flows: list = field(default_factory=list)  # [time_ms, usd, type] deposits, withdrawals
 
     def to_json(self) -> str:
-        return json.dumps({"start": self.start, "peak": self.peak, "alerted": sorted(self.alerted)})
+        return json.dumps(
+            {
+                "start": self.start,
+                "peak": self.peak,
+                "alerted": sorted(self.alerted),
+                "since_ms": self.since_ms,
+                "flows": self.flows,
+            }
+        )
 
     @classmethod
     def from_json(cls, raw: bytes | str) -> BookRisk:
         d = json.loads(raw)
-        return cls(float(d["start"]), float(d["peak"]), set(d.get("alerted", [])))
+        return cls(
+            float(d["start"]),
+            float(d["peak"]),
+            set(d.get("alerted", [])),
+            int(d.get("since_ms", 0)),
+            [list(f) for f in d.get("flows", [])],
+        )
+
+    def apply_flows(self, flows: list[tuple[int, float, str]], day: DayRisk) -> list[str]:
+        """Book each new flow as capital; returns one info line per flow."""
+        out = []
+        for t, usd, kind in flows:
+            if t <= self.since_ms:
+                continue  # read already (the ledger query includes its start time)
+            self.start += usd
+            self.peak += usd
+            day.baseline += usd
+            self.flows.append([t, usd, kind])
+            self.since_ms = t
+            out.append(
+                f"{kind} {usd:+.2f} USD counted as capital, not performance:"
+                f" start {self.start - usd:.0f} -> {self.start:.0f}"
+            )
+        return out
 
 
 def evaluate_book(

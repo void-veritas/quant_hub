@@ -170,6 +170,10 @@ def cmd_riskwatch(args) -> int:
 
     book = Book.from_yaml(args.book)
     store = make_store()
+    ckey = capital_key(book.book_id, args.mode)
+    raw = store.get(ckey)
+    cap = BookRisk.from_json(raw) if raw else None
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
 
     async def snap():
         adapter = make_adapter(book, args.mode, store)
@@ -178,23 +182,26 @@ def cmd_riskwatch(args) -> int:
             first = await adapter.snapshot()
             quotes = await adapter.quotes(sorted(first.positions)) if first.positions else {}
             # paper equity marks to the quotes just loaded, so read the account again
-            return (await adapter.snapshot()) if quotes else first, {
-                c: q.mid for c, q in quotes.items()
-            }
+            account = (await adapter.snapshot()) if quotes else first
+            ledger = getattr(adapter, "capital_flows", None)  # live only: paper has no deposits
+            flows = await ledger(cap.since_ms) if ledger and cap else ([], [])
+            return account, {c: q.mid for c, q in quotes.items()}, flows
         finally:
             await adapter.close()
 
-    account, mids = asyncio.run(snap())
+    account, mids, (flows, unknown) = asyncio.run(snap())
     key = risk_key(book.book_id, args.date)
     raw = store.get(key)
     day = DayRisk.from_json(raw) if raw else DayRisk(account.equity)
+    if cap is None:  # first check in this mode: the ledger counts from now
+        cap = BookRisk(account.equity, account.equity, since_ms=now_ms)
+    info = cap.apply_flows(flows, day)
+    if unknown:
+        info.append(f"ledger entries not understood, check the account: {sorted(set(unknown))}")
     alerts = evaluate(
         account.equity, account.positions, mids, day, book.max_abs_weight, book.max_gross
     )
     store.put(key, day.to_json())
-    ckey = capital_key(book.book_id, args.mode)
-    raw = store.get(ckey)
-    cap = BookRisk.from_json(raw) if raw else BookRisk(account.equity, account.equity)
     book_alerts, stop = evaluate_book(
         account.equity, cap, book.review_drawdown, book.pause_drawdown
     )
@@ -202,17 +209,18 @@ def cmd_riskwatch(args) -> int:
     if stop:
         store.put(pause_key(book.book_id), datetime.now(UTC).isoformat())
     alerts += book_alerts
-    print(
-        json.dumps(
-            {
-                "equity": account.equity,
-                "baseline": day.baseline,
-                "start": cap.start,
-                "peak": cap.peak,
-                "alerts": alerts,
-            }
-        )
-    )
+    report = {
+        "equity": account.equity,
+        "baseline": day.baseline,
+        "start": cap.start,
+        "peak": cap.peak,
+        "performance": account.equity - cap.start,  # deposits and withdrawals excluded
+        "flows": cap.flows,
+        "alerts": alerts,
+    }
+    print(json.dumps(report))
+    if info:
+        asyncio.run(make_notifier().send("info", f"{book.book_id}: capital", "\n".join(info)))
     if alerts:
         level = "critical" if stop else "warning"
         asyncio.run(make_notifier().send(level, f"{book.book_id}: risk check", "\n".join(alerts)))

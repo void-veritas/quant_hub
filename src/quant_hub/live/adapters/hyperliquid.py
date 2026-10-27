@@ -55,6 +55,46 @@ def signing_vault(account: str, account_role: dict, agent: str, agent_role: dict
     return vault
 
 
+def parse_ledger(rows: list[dict], me: str) -> tuple[list[tuple[int, float, str]], list[str]]:
+    """External cash flows of the perp account ``me`` from ``userNonFundingLedgerUpdates``.
+
+    Returns ([(time_ms, usd, type)], unknown types). ``usd`` is the change of the perp
+    account value (marginSummary.accountValue, what the session sizes on): deposits and
+    transfers in are positive, withdrawals and transfers out negative. Spot-only moves are
+    not flows of the perp account. A type this function does not know is reported, never
+    guessed: the caller alerts so a person can look.
+    """
+    me = me.lower()
+    out: list[tuple[int, float, str]] = []
+    unknown: list[str] = []
+    for r in rows:
+        d, t = r.get("delta") or {}, int(r.get("time", 0))
+        kind = d.get("type", "?")
+        fee = float(d.get("fee", 0) or 0)
+        to_me = str(d.get("destination", "")).lower() == me
+        usd = None
+        if kind == "deposit":
+            usd = float(d["usdc"])
+        elif kind == "withdraw":
+            usd = -(float(d["usdc"]) + fee)
+        elif kind in ("internalTransfer", "subAccountTransfer"):
+            usd = float(d["usdc"]) if to_me else -(float(d["usdc"]) + fee)
+        elif kind == "accountClassTransfer":  # spot <-> perp of the same account
+            usd = float(d["usdc"]) if d.get("toPerp") else -float(d["usdc"])
+        elif kind == "send":  # between dexes and accounts; "" is the main perp dex
+            amount = float(d.get("usdcValue") or 0)
+            into = to_me and d.get("destinationDex", "") == ""
+            outof = str(d.get("user", "")).lower() == me and d.get("sourceDex", "") == ""
+            usd = (amount if into else 0.0) - ((amount + fee) if outof else 0.0)
+        elif kind == "spotTransfer":
+            usd = 0.0
+        else:
+            unknown.append(kind)
+        if usd:
+            out.append((t, usd, kind))
+    return out, unknown
+
+
 def parse_fill(raw: dict) -> Fill | None:
     """Map an HL fill record (REST ``userFills`` or WS ``userFills``) to a :class:`Fill`."""
     cloid = raw.get("cloid")
@@ -258,6 +298,15 @@ class HyperliquidAdapter:
             if levels[0] and levels[1]:
                 out[coin] = Quote(float(levels[0][0]["px"]), float(levels[1][0]["px"]))
         return out
+
+    async def capital_flows(self, start_ms: int) -> tuple[list[tuple[int, float, str]], list[str]]:
+        """Deposits, withdrawals and transfers of the account since ``start_ms`` (parse_ledger)."""
+        rows = await asyncio.to_thread(
+            self.info.post,
+            "/info",
+            {"type": "userNonFundingLedgerUpdates", "user": self.address, "startTime": start_ms},
+        )
+        return parse_ledger(rows or [], self.address)
 
     async def fills_since(self, start_ms: int) -> list[Event]:
         raw = await asyncio.to_thread(self.info.user_fills_by_time, self.address, start_ms)

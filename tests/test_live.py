@@ -732,3 +732,115 @@ def test_run_without_weights_alerts_once(tmp_path, monkeypatch):
     assert cli.main(["run", "--book", str(book), "--date", "2026-10-28"]) == 0
     state = json.loads(cli.make_store().get(state_key("b", "2026-10-28")))
     assert state["status"] == "no_weights"
+
+
+def test_ledger_flows_of_the_perp_account():
+    from quant_hub.live.adapters.hyperliquid import parse_ledger
+
+    me, other = "0xMe", "0xother"
+    rows = [
+        {"time": 1, "delta": {"type": "deposit", "usdc": "800.0"}},
+        {"time": 2, "delta": {"type": "withdraw", "usdc": "100.0", "fee": "1.0"}},
+        {
+            "time": 3,
+            "delta": {
+                "type": "subAccountTransfer",
+                "usdc": "50",
+                "user": other,
+                "destination": me.lower(),
+            },
+        },
+        {
+            "time": 4,
+            "delta": {
+                "type": "internalTransfer",
+                "usdc": "20",
+                "user": me,
+                "destination": other,
+                "fee": "0",
+            },
+        },
+        {"time": 5, "delta": {"type": "accountClassTransfer", "usdc": "30", "toPerp": False}},
+        {
+            "time": 6,
+            "delta": {
+                "type": "send",
+                "user": other,
+                "destination": me,
+                "sourceDex": "spot",
+                "destinationDex": "",
+                "token": "USDC",
+                "amount": "5",
+                "usdcValue": "5",
+                "fee": "0",
+            },
+        },
+        {
+            "time": 7,
+            "delta": {
+                "type": "send",
+                "user": other,
+                "destination": me,
+                "sourceDex": "spot",
+                "destinationDex": "spot",
+                "token": "USDC",
+                "amount": "5",
+                "usdcValue": "5",
+            },
+        },
+        {
+            "time": 8,
+            "delta": {"type": "spotTransfer", "token": "X", "amount": "1", "usdcValue": "1"},
+        },
+        {"time": 9, "delta": {"type": "vaultDeposit", "vault": other, "usdc": "10"}},
+    ]
+    flows, unknown = parse_ledger(rows, me)
+    assert flows == [
+        (1, 800.0, "deposit"),
+        (2, -101.0, "withdraw"),
+        (3, 50.0, "subAccountTransfer"),
+        (4, -20.0, "internalTransfer"),
+        (5, -30.0, "accountClassTransfer"),
+        (6, 5.0, "send"),
+    ]
+    assert unknown == ["vaultDeposit"]  # reported, not guessed
+
+
+def test_riskwatch_counts_deposits_and_withdrawals_as_capital(tmp_path, monkeypatch):
+    from quant_hub.live import cli
+    from quant_hub.live.adapters.base import AccountSnapshot
+    from quant_hub.live.riskwatch import BookRisk, capital_key
+
+    book = tmp_path / "b.yaml"
+    book.write_text("book_id: b\nreview_drawdown: 0.08\npause_drawdown: 0.12\n")
+    monkeypatch.setenv("LIVE_STORE", str(tmp_path / "store"))
+    monkeypatch.delenv("LIVE_BUCKET", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    acc = {"equity": 1000.0, "flows": []}
+
+    class Live:
+        async def connect(self):
+            pass
+
+        async def close(self):
+            pass
+
+        async def snapshot(self):
+            return AccountSnapshot(acc["equity"], {}, [], "")
+
+        async def capital_flows(self, start_ms):
+            return [f for f in acc["flows"] if f[0] >= start_ms], []
+
+    monkeypatch.setattr(cli, "make_adapter", lambda *a: Live())
+    argv = ["riskwatch", "--book", str(book), "--mode", "live", "--date", "2026-10-29"]
+    assert cli.main(argv) == 0
+    store = cli.make_store()
+    t0 = BookRisk.from_json(store.get(capital_key("b", "live"))).since_ms
+    acc.update(equity=700.0, flows=[(t0 + 1, -300.0, "withdraw")])  # -30% equity, no trading loss
+    assert cli.main(argv) == 0 and not store.exists(pause_key("b"))
+    cap = BookRisk.from_json(store.get(capital_key("b", "live")))
+    assert (cap.start, cap.peak) == (700.0, 700.0) and cap.flows == [[t0 + 1, -300.0, "withdraw"]]
+    assert cli.main(argv) == 0  # the same ledger row is not booked twice
+    assert BookRisk.from_json(store.get(capital_key("b", "live"))).start == 700.0
+    acc["equity"] = 610.0  # a real -90 = -12.9% of the 700 start
+    assert cli.main(argv) == 0 and store.exists(pause_key("b"))
