@@ -894,3 +894,26 @@ def test_full_close_below_minimum_goes_reduce_only(tmp_path):
         is None
     )
     assert risk.check_order("BTC", "sell", it.size, it.price, 1000.0, dust, 0.0) is not None
+
+
+def test_snapshot_command_sends_each_books_picture(tmp_path):
+    from quant_hub.live.notify import CommandPoller, snapshot_key
+
+    class Bot:
+        def __init__(self):
+            self.photos, self.texts = [], []
+
+        async def send(self, level, title, text=""):
+            self.texts.append(title)
+
+        async def send_photo(self, png, caption=""):
+            self.photos.append((png, caption))
+
+    store = Store(tmp_path)
+    store.put(snapshot_key("a"), b"\x89PNG a")
+    bot = Bot()
+    poller = CommandPoller(store, bot, {1}, ["a", "b"])
+    reply = asyncio.run(poller.handle("/snapshot"))
+    assert bot.photos == [(b"\x89PNG a", "a snapshot")] and "no snapshot yet for b" in reply
+    asyncio.run(poller.handle("/snapshot a"))
+    assert len(bot.photos) == 2 and "/snapshot" in asyncio.run(poller.handle("/help"))

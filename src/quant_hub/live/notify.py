@@ -1,9 +1,9 @@
 """Alerts out, safety-only commands in.
 
 The notifier is a separate process from the executor: the executor never listens on
-the network. Inbound commands (``/status``, ``/pause``) are accepted only from
-whitelisted Telegram user ids and only write flags in the store; resuming is a shell
-operation on the host, by design.
+the network. Inbound commands (``/status``, ``/pause``, ``/snapshot``) are accepted only
+from whitelisted Telegram user ids; they read the store and at most write flags there;
+resuming is a shell operation on the host, by design.
 """
 
 from __future__ import annotations
@@ -61,9 +61,23 @@ class TelegramNotifier:
             )
             r.raise_for_status()
 
+    async def send_photo(self, png: bytes, caption: str = "") -> None:
+        async with httpx.AsyncClient(timeout=max(self.timeout, 30.0)) as c:
+            r = await c.post(
+                f"{self._base}/sendPhoto",
+                data={"chat_id": self.chat_id, "caption": caption[:1000]},
+                files={"photo": ("snapshot.png", png, "image/png")},
+            )
+            r.raise_for_status()
+
+
+def snapshot_key(book_id: str) -> str:
+    """The book's latest one-picture summary, written by analytics after the attribution."""
+    return f"reports/{book_id}/snapshot.png"
+
 
 class CommandPoller:
-    """Long-poll the bot for ``/status <book>`` and ``/pause <book>`` from allowed users."""
+    """Long-poll the bot for ``/status``, ``/pause <book>`` and ``/snapshot`` from allowed users."""
 
     def __init__(
         self, store: Store, notifier: TelegramNotifier, allowed_user_ids: set[int], books: list[str]
@@ -106,8 +120,20 @@ class CommandPoller:
                     f"paused {args[0]}: no new orders; resting ones are cancelled on the next "
                     "tick. Resume from the host."
                 )
+        elif cmd == "/snapshot":
+            books = args[:1] if args and args[0] in self.books else self.books
+            missing = []
+            for b in books:
+                png = self.store.get(snapshot_key(b))
+                if png is None:
+                    missing.append(b)
+                else:
+                    await self.notifier.send_photo(png, f"{b} snapshot")
+            if not missing:
+                return f"snapshot sent: {', '.join(books)}"
+            reply = f"no snapshot yet for {', '.join(missing)} (written daily after 10:10 UTC)"
         else:
-            reply = "commands: /status [book], /pause <book>"
+            reply = "commands: /status [book], /pause <book>, /snapshot [book]"
         await self.notifier.send("info", reply)
         return reply
 
