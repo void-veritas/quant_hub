@@ -958,8 +958,13 @@ def test_paper_account_is_marked_to_market_and_pays_funding(tmp_path):
     from quant_hub.live.adapters.paper_hl import PaperOnHyperliquid
 
     store = Store(tmp_path)
-    acc = {"equity": 800.0, "cash_pnl": 0.0, "positions": {"BTC": 0.01},
-           "cost_basis": {"BTC": 1000.0}, "funding_until_ms": 1_000}
+    acc = {
+        "equity": 800.0,
+        "cash_pnl": 0.0,
+        "positions": {"BTC": 0.01},
+        "cost_basis": {"BTC": 1000.0},
+        "funding_until_ms": 1_000,
+    }
     store.put("paper/b/account.json", json.dumps(acc))
 
     def connected(writer):
