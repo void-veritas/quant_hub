@@ -166,6 +166,7 @@ def cmd_riskwatch(args) -> int:
         evaluate,
         evaluate_book,
         evaluate_health,
+        evaluate_listing,
         risk_key,
     )
 
@@ -188,11 +189,12 @@ def cmd_riskwatch(args) -> int:
             flows = await ledger(cap.since_ms) if ledger and cap else ([], [])
             check = getattr(adapter, "health", None)  # live only
             health = await check() if check else {}
-            return account, {c: q.mid for c, q in quotes.items()}, flows, health
+            listed = set(adapter.sz_decimals()) if hasattr(adapter, "sz_decimals") else set()
+            return account, {c: q.mid for c, q in quotes.items()}, flows, health, listed
         finally:
             await adapter.close()
 
-    account, mids, (flows, unknown), health = asyncio.run(snap())
+    account, mids, (flows, unknown), health, listed = asyncio.run(snap())
     key = risk_key(book.book_id, args.date)
     raw = store.get(key)
     day = DayRisk.from_json(raw) if raw else DayRisk(account.equity)
@@ -205,6 +207,8 @@ def cmd_riskwatch(args) -> int:
         account.equity, account.positions, mids, day, book.max_abs_weight, book.max_gross
     )
     alerts += evaluate_health(health, day, now_ms)
+    unlisted = evaluate_listing(account.positions, listed, day)
+    alerts += unlisted
     store.put(key, day.to_json())
     book_alerts, stop = evaluate_book(
         account.equity, cap, book.review_drawdown, book.pause_drawdown
@@ -226,7 +230,7 @@ def cmd_riskwatch(args) -> int:
     if info:
         asyncio.run(make_notifier().send("info", f"{book.book_id}: capital", "\n".join(info)))
     if alerts:
-        level = "critical" if stop else "warning"
+        level = "critical" if stop or unlisted else "warning"
         asyncio.run(make_notifier().send(level, f"{book.book_id}: risk check", "\n".join(alerts)))
     return 0
 

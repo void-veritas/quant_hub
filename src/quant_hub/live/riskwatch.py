@@ -163,6 +163,20 @@ def evaluate_book(
     return out, stop
 
 
+def evaluate_listing(positions: dict[str, float], listed: set[str], day: DayRisk) -> list[str]:
+    """A held coin the venue no longer lists (delisted): once a day per coin, needs a person."""
+    out = []
+    if not listed:
+        return out  # no venue metadata (e.g. a test exchange): nothing to compare
+    for coin in sorted(c for c, q in positions.items() if q and c not in listed):
+        if f"unlisted:{coin}" not in day.alerted:
+            out.append(
+                f"{coin}: position held but the venue no longer lists it (delisted?), check it"
+            )
+            day.alerted.add(f"unlisted:{coin}")
+    return out
+
+
 def evaluate_health(health: dict, day: DayRisk, now_ms: int) -> list[str]:
     """Margin and key expiry lines, each once per day."""
     out = []

@@ -917,3 +917,13 @@ def test_snapshot_command_sends_each_books_picture(tmp_path):
     assert bot.photos == [(b"\x89PNG a", "a snapshot")] and "no snapshot yet for b" in reply
     asyncio.run(poller.handle("/snapshot a"))
     assert len(bot.photos) == 2 and "/snapshot" in asyncio.run(poller.handle("/help"))
+
+
+def test_a_held_coin_that_the_venue_delisted_is_flagged_once_a_day():
+    from quant_hub.live.riskwatch import DayRisk, evaluate_listing
+
+    day = DayRisk(800.0)
+    lines = evaluate_listing({"BTC": 0.01, "VINE": -50.0, "ETH": 0.0}, {"BTC", "ETH"}, day)
+    assert len(lines) == 1 and lines[0].startswith("VINE")
+    assert evaluate_listing({"VINE": -50.0}, {"BTC"}, day) == []  # once a day
+    assert evaluate_listing({"VINE": -50.0}, set(), DayRisk(1.0)) == []  # no metadata: no claim
