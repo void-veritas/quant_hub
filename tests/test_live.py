@@ -354,6 +354,7 @@ def test_garbage_stream_does_not_corrupt_state(tmp_path):
     # ledger equals the venue exactly despite duplicates and reordering
     snap = asyncio.run(ex.snapshot())
     st = json.loads(store.get(state_key("yolo_daily", AS_OF)))
+    assert st["adapter"] == ex.name  # the attribution tells paper days from live days by it
     for c, size in snap.positions.items():
         assert size == pytest.approx(st["targets"][c], abs=1e-6)
 

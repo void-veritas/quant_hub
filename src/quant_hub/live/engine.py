@@ -178,6 +178,8 @@ class Session:
             "as_of": self.as_of,
             "status": self.status,
             "phase": self.phase,
+            # which venue the session traded on: "hyperliquid" = live money, "paper_hl" = paper
+            "adapter": getattr(self.adapter, "name", ""),
             "updated_at": self.clock.now().isoformat(),
             "equity": self.equity,
             "start_equity": self.risk.state.start_equity if self.risk else self.equity,
