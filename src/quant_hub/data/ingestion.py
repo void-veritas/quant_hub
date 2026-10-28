@@ -72,12 +72,24 @@ def _resolve_assets(args, exchange: str) -> pd.DataFrame:
     return inst[inst["canonical_id"].isin(wanted)]
 
 
-def cmd_instruments(_args) -> None:
-    """Rebuild config/instruments.csv from live venue metadata."""
-    df = build_instruments()
-    save_instruments(df)
+def cmd_instruments(args) -> None:
+    """Refresh the instruments table from live venue metadata; print what changed on each venue."""
+    import json
+
+    from quant_hub.data.instruments import changes, instruments_path, load_instruments
+
+    old = (
+        load_instruments()
+        if instruments_path().exists()
+        else pd.DataFrame(columns=["exchange", "status", "canonical_id"])
+    )
+    df = save_instruments(build_instruments(binance=not args.hyperliquid_only))
     counts = df.groupby(["exchange", "status"]).size()
-    print(f"instruments table written ({len(df)} rows)\n{counts.to_string()}")
+    print(
+        f"instruments table written to {instruments_path()} ({len(df)} rows)\n{counts.to_string()}"
+    )
+    for ex in ("hyperliquid", "binance"):
+        print("CHANGES " + json.dumps({"exchange": ex, **changes(old, df, ex)}))
 
 
 def _ohlcv_binance_1d(inst: pd.DataFrame, start: date, end: date) -> None:
@@ -418,7 +430,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="quant_hub.data.ingestion", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("instruments", help="(re)build config/instruments.csv from venue metadata")
+    inst = sub.add_parser("instruments", help="refresh the instruments table from venue metadata")
+    inst.add_argument("--hyperliquid-only", action="store_true", help="skip Binance metadata")
 
     def _add_common(p, exchanges):
         p.add_argument("--exchange", choices=exchanges, default=exchanges[0])
