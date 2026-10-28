@@ -46,7 +46,7 @@ def make_notifier():
     return LogNotifier()
 
 
-def make_adapter(book: Book, mode: str, store: Store):
+def make_adapter(book: Book, mode: str, store: Store, writer: bool = True):
     if mode == "live":
         from quant_hub.live.adapters.hyperliquid import HyperliquidAdapter
 
@@ -55,7 +55,7 @@ def make_adapter(book: Book, mode: str, store: Store):
         from quant_hub.live.adapters.paper_hl import PaperOnHyperliquid
 
         return PaperOnHyperliquid(
-            book.book_id, store, float(os.environ.get("PAPER_EQUITY", "1000"))
+            book.book_id, store, float(os.environ.get("PAPER_EQUITY", "1000")), writer=writer
         )
     raise ValueError(mode)
 
@@ -178,7 +178,8 @@ def cmd_riskwatch(args) -> int:
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
 
     async def snap():
-        adapter = make_adapter(book, args.mode, store)
+        # read-only: never overwrites the account a running session writes
+        adapter = make_adapter(book, args.mode, store, writer=False)
         await adapter.connect()
         try:
             first = await adapter.snapshot()

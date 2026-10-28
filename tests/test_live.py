@@ -709,7 +709,7 @@ def test_riskwatch_pauses_the_book_past_its_pause_level(tmp_path, monkeypatch):
         async def snapshot(self):
             return AccountSnapshot(equity["v"], {}, [], "")
 
-    monkeypatch.setattr(cli, "make_adapter", lambda *a: Acc())
+    monkeypatch.setattr(cli, "make_adapter", lambda *a, **k: Acc())
     argv = ["riskwatch", "--book", str(book), "--mode", "live", "--date", "2026-10-29"]
     assert cli.main(argv) == 0
     store = cli.make_store()
@@ -729,7 +729,7 @@ def test_run_without_weights_alerts_once(tmp_path, monkeypatch):
     monkeypatch.setenv("LIVE_STORE", str(tmp_path / "store"))
     monkeypatch.delenv("LIVE_BUCKET", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    monkeypatch.setattr(cli, "make_adapter", lambda *a: FakeExchange(equity=800.0))
+    monkeypatch.setattr(cli, "make_adapter", lambda *a, **k: FakeExchange(equity=800.0))
     assert cli.main(["run", "--book", str(book), "--date", "2026-10-28"]) == 0
     state = json.loads(cli.make_store().get(state_key("b", "2026-10-28")))
     assert state["status"] == "no_weights"
@@ -832,7 +832,7 @@ def test_riskwatch_counts_deposits_and_withdrawals_as_capital(tmp_path, monkeypa
         async def capital_flows(self, start_ms):
             return [f for f in acc["flows"] if f[0] >= start_ms], []
 
-    monkeypatch.setattr(cli, "make_adapter", lambda *a: Live())
+    monkeypatch.setattr(cli, "make_adapter", lambda *a, **k: Live())
     argv = ["riskwatch", "--book", str(book), "--mode", "live", "--date", "2026-10-29"]
     assert cli.main(argv) == 0
     store = cli.make_store()
@@ -928,3 +928,52 @@ def test_a_held_coin_that_the_venue_delisted_is_flagged_once_a_day():
     assert len(lines) == 1 and lines[0].startswith("VINE")
     assert evaluate_listing({"VINE": -50.0}, {"BTC"}, day) == []  # once a day
     assert evaluate_listing({"VINE": -50.0}, set(), DayRisk(1.0)) == []  # no metadata: no claim
+
+
+class _Feed:
+    """Stand-in for the read-only Hyperliquid feed: one quote, two hourly funding prints."""
+
+    def __init__(self):
+        self.info = self
+        self.calls = []
+
+    async def connect(self):
+        pass
+
+    async def close(self):
+        pass
+
+    def sz_decimals(self):
+        return {"BTC": 5}
+
+    async def quotes(self, coins):
+        return {c: Quote(100_990.0, 101_010.0) for c in coins}
+
+    def funding_history(self, coin, start, end):
+        self.calls.append((coin, start, end))
+        return [{"fundingRate": "0.0001"}, {"fundingRate": "0.0001"}]
+
+
+def test_paper_account_is_marked_to_market_and_pays_funding(tmp_path):
+    from quant_hub.live.adapters.paper_hl import PaperOnHyperliquid
+
+    store = Store(tmp_path)
+    acc = {"equity": 800.0, "cash_pnl": 0.0, "positions": {"BTC": 0.01},
+           "cost_basis": {"BTC": 1000.0}, "funding_until_ms": 1_000}
+    store.put("paper/b/account.json", json.dumps(acc))
+
+    def connected(writer):
+        a = PaperOnHyperliquid("b", store, 800.0, writer=writer)
+        a.feed = _Feed()
+        asyncio.run(a.connect())
+        return a
+
+    reader = connected(writer=False)  # riskwatch: marks and accrues in memory, writes nothing
+    snap = asyncio.run(reader.snapshot())
+    assert snap.equity == pytest.approx(800 + (0.01 * 101_000 - 1000) - 0.01 * 101_000 * 0.0002)
+    asyncio.run(reader.close())
+    assert json.loads(store.get("paper/b/account.json")) == acc
+    session = connected(writer=True)  # the session settles funding and moves the clock
+    saved = json.loads(store.get("paper/b/account.json"))
+    assert saved["funding_paid"] == pytest.approx(0.202) and saved["funding_until_ms"] > 1_000
+    assert session.feed.calls[0][1] == 1_001  # from the last settlement, not from the start of time

@@ -1,13 +1,20 @@
 """Paper trading against live Hyperliquid prices: real quotes, simulated fills.
 
 The read-only HL adapter supplies quotes; the paper exchange matches our orders
-against them. Positions live in the store (``paper/<book>/positions.json``) so a
+against them. The account lives in the store (``paper/<book>/account.json``) so a
 paper book persists across sessions, with the same event flow as live.
+
+Like a real account, the paper equity is marked to market (held coins are quoted on
+connect, before the first snapshot) and pays or earns Hyperliquid's hourly funding on
+its positions between connects (``fundingHistory``, notional at the current mid; a long
+pays a positive rate). The first connect of an account starts the funding clock.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 
 from quant_hub.live.adapters.base import AccountSnapshot, PlaceResult
 from quant_hub.live.adapters.hyperliquid import HyperliquidAdapter
@@ -21,13 +28,25 @@ from quant_hub.live.store import Store
 class PaperOnHyperliquid:
     name = "paper_hl"
 
-    def __init__(self, book_id: str, store: Store, equity: float, address: str | None = None):
+    def __init__(
+        self,
+        book_id: str,
+        store: Store,
+        equity: float,
+        address: str | None = None,
+        writer: bool = True,
+    ):
         self.book_id = book_id
         self.store = store
         self.key = f"paper/{book_id}/account.json"
         self.feed = HyperliquidAdapter(address=address or "0x" + "0" * 40, paper=True)
         self.paper = PaperExchange(equity=equity)
         self.connected = False
+        self.funding_until_ms = 0  # funding settled up to here (ms)
+        self.funding_paid = 0.0  # cumulative, positive = paid by the account
+        # only the session writes the account: riskwatch (hourly, also at 09:30 inside the window)
+        # reads it, marks it and accrues funding in memory, and never overwrites the session's fills
+        self.writer = writer
 
     async def connect(self) -> None:
         await self.feed.connect()
@@ -39,8 +58,30 @@ class PaperOnHyperliquid:
             self.paper.cash_pnl = float(acc.get("cash_pnl", 0.0))
             self.paper.positions = {k: float(v) for k, v in acc.get("positions", {}).items()}
             self.paper._cost_basis = {k: float(v) for k, v in acc.get("cost_basis", {}).items()}
+            self.funding_until_ms = int(acc.get("funding_until_ms") or 0)
+            self.funding_paid = float(acc.get("funding_paid", 0.0))
+        held = [c for c, q in self.paper.positions.items() if q]
+        if held:  # mark to market before anyone reads the equity
+            self.paper.set_quotes(await self.feed.quotes(held))
+        await self._accrue_funding(held)
         await self.paper.connect()
         self.connected = True
+
+    async def _accrue_funding(self, held: list[str], now_ms: int | None = None) -> None:
+        now_ms = now_ms or int(time.time() * 1000)
+        since = self.funding_until_ms or now_ms
+        paid = 0.0
+        for coin in held:
+            q = self.paper._quotes.get(coin)
+            if q is None or since >= now_ms:
+                continue
+            rows = await asyncio.to_thread(self.feed.info.funding_history, coin, since + 1, now_ms)
+            rate = sum(float(r.get("fundingRate", 0.0)) for r in rows or [])
+            paid += self.paper.positions[coin] * q.mid * rate
+        self.paper.cash_pnl -= paid
+        self.funding_paid += paid
+        self.funding_until_ms = now_ms
+        self._save()
 
     async def close(self) -> None:
         self._save()
@@ -49,6 +90,8 @@ class PaperOnHyperliquid:
         self.connected = False
 
     def _save(self) -> None:
+        if not self.writer:
+            return
         self.store.put(
             self.key,
             json.dumps(
@@ -57,6 +100,8 @@ class PaperOnHyperliquid:
                     "cash_pnl": self.paper.cash_pnl,
                     "positions": self.paper.positions,
                     "cost_basis": self.paper._cost_basis,
+                    "funding_until_ms": self.funding_until_ms,
+                    "funding_paid": self.funding_paid,
                 },
                 sort_keys=True,
             ),
