@@ -54,6 +54,12 @@ class Book:
     maker_fee: float = 0.00015
     taker_fee: float = 0.00045
     tick_seconds: float = 1.0
+    # paper only, the cascade (Egor, 2026-10-28): wait for these books' sessions of the day (in
+    # order, until window start + price_from_wait_minutes), then fill every coin they traded at
+    # their volume-weighted fill price (first book wins); the other coins trade on paper as usual.
+    # The live book has the venue's request budget to itself while it trades.
+    price_from: list[str] = field(default_factory=list)
+    price_from_wait_minutes: int = 40
     spec: dict[str, Any] = field(default_factory=dict)  # strategy config (e.g. RunConfig kwargs)
 
     @classmethod

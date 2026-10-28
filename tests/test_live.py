@@ -27,7 +27,7 @@ from quant_hub.live.contracts import (
 from quant_hub.live.engine import Session
 from quant_hub.live.events import Fill, OrderUpdate
 from quant_hub.live.notify import LogNotifier
-from quant_hub.live.oms import OMS, make_cloid
+from quant_hub.live.oms import OMS, Order, make_cloid
 from quant_hub.live.policy import Quote, RebalancePolicy, passive_price
 from quant_hub.live.rounding import round_price_down, round_price_up, round_size
 from quant_hub.live.store import Store
@@ -982,3 +982,111 @@ def test_paper_account_is_marked_to_market_and_pays_funding(tmp_path):
     saved = json.loads(store.get("paper/b/account.json"))
     assert saved["funding_paid"] == pytest.approx(0.202) and saved["funding_until_ms"] > 1_000
     assert session.feed.calls[0][1] == 1_001  # from the last settlement, not from the start of time
+
+
+# ---------------------------------------------------------------- robustness and the paper cascade
+
+
+def test_a_crash_mid_session_cancels_our_orders_and_says_so(tmp_path):
+    store, clock, ex = setup(tmp_path, {"BTC": 0.2, "ETH": -0.2})
+    calls = {"n": 0}
+    real = ex.quotes
+
+    async def flaky(coins):
+        calls["n"] += 1
+        if calls["n"] > 3:  # orders are resting by now
+            raise RuntimeError("429 Too Many Requests")
+        return await real(coins)
+
+    ex.quotes = flaky
+    note = LogNotifier()
+    s = session(book(), store, ex, clock, notifier=note)
+    with pytest.raises(RuntimeError):
+        run(s)
+    assert not ex._resting  # nothing left on the venue
+    assert json.loads(store.get(state_key("yolo_daily", AS_OF)))["status"] == "error"
+    assert any(lvl == "critical" and "crashed" in title for lvl, title, _ in note.sent)
+
+
+def test_the_venue_dead_man_cancel_is_armed_for_the_window_end(tmp_path):
+    store, clock, ex = setup(tmp_path, {"BTC": 0.2, "ETH": -0.2})
+    armed = []
+
+    async def arm(at_ms):
+        armed.append(at_ms)
+
+    ex.schedule_cancel_all = arm
+    run(session(book(), store, ex, clock))
+    end = START + timedelta(minutes=60)
+    assert armed == [int((end + timedelta(minutes=2)).timestamp() * 1000)]
+
+
+def test_quotes_skip_a_coin_the_venue_refuses_instead_of_failing():
+    from quant_hub.live.adapters.hyperliquid import HyperliquidAdapter
+
+    class Info:
+        def l2_snapshot(self, coin):
+            if coin == "ETH":
+                raise RuntimeError("429")
+            return {"levels": [[{"px": "99"}], [{"px": "101"}]]}
+
+    a = HyperliquidAdapter(address="0x" + "1" * 40, paper=True)
+    a.info, a._decimals = Info(), {"BTC": 5, "ETH": 4}
+    q = asyncio.run(a.quotes(["BTC", "ETH"]))
+    assert set(q) == {"BTC"} and a.quote_errors == 1
+
+
+def _upstream_fills(store, book_id, rows):
+    import io
+
+    import pandas as pd
+
+    from quant_hub.live.contracts import fills_key
+
+    df = pd.DataFrame(rows, columns=["coin", "side", "size", "price"])
+    buf = io.BytesIO()
+    df.to_parquet(buf, index=False)
+    store.put(fills_key(book_id, AS_OF), buf.getvalue())
+
+
+def test_paper_cascade_fills_shared_coins_at_the_upstream_prices(tmp_path):
+    from quant_hub.live.adapters.paper_hl import PaperOnHyperliquid, upstream_prices
+    from quant_hub.live.cli import cascade_prices
+    from quant_hub.live.log import get_logger
+
+    store = Store(tmp_path)
+    _upstream_fills(
+        store, "yolo10_daily", [("BTC", "buy", 0.01, 100_000.0), ("BTC", "buy", 0.03, 100_200.0)]
+    )
+    _upstream_fills(
+        store, "yolo20_daily", [("BTC", "sell", 0.01, 99_000.0), ("SOL", "buy", 1.0, 150.0)]
+    )
+    up = upstream_prices(store, ["yolo10_daily", "yolo20_daily"], AS_OF)
+    assert up == pytest.approx({"BTC": 100_150.0, "SOL": 150.0})  # the first book wins on BTC
+    for b in ("yolo10_daily", "yolo20_daily"):
+        store.put(state_key(b, AS_OF), json.dumps({"status": "done"}))
+    bk = book(book_id="yolo_daily", price_from=["yolo10_daily", "yolo20_daily"])
+    log = get_logger("test.cascade")
+    assert cascade_prices(store, bk, AS_OF, "paper", log, poll_s=0) == up
+    assert cascade_prices(store, bk, AS_OF, "live", log, poll_s=0) == {}  # never on live money
+
+    a = PaperOnHyperliquid("yolo_daily", store, 800.0, copy_prices=up)
+    a.feed = _Feed()
+    asyncio.run(a.connect())
+    cloid = make_cloid("yolo_daily", AS_OF, "SOL", 1)
+    order = Order(cloid, "SOL", "buy", 2.0, 149.0, "Alo", START.isoformat())
+    res = asyncio.run(a.place(order))
+    assert res.ok and a.paper.positions["SOL"] == 2.0
+    fill = [e for e in a.drain() if isinstance(e, Fill)][0]
+    assert fill.price == 150.0 and fill.liquidity == "maker"
+
+
+def test_riskwatch_flags_orders_resting_outside_the_window_once_a_day():
+    from quant_hub.live.riskwatch import DayRisk, evaluate_open_orders
+
+    day = DayRisk(750.0)
+    orders = [{"coin": "BTC"}, {"coin": "ETH"}]
+    assert evaluate_open_orders(orders, in_window=True, day=day) == []  # a session is trading
+    first = evaluate_open_orders(orders, in_window=False, day=day)
+    assert len(first) == 1 and "BTC, ETH" in first[0]
+    assert evaluate_open_orders(orders, in_window=False, day=day) == []  # once a day

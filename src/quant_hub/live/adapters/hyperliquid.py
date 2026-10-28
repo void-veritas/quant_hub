@@ -191,6 +191,7 @@ class HyperliquidAdapter:
         self._events: list[Event] = []
         self._lock = threading.Lock()
         self.connected = False
+        self.quote_errors = 0  # coins skipped in quotes() (rate limit, timeout)
         self._loop = loop
         if not self.address:
             raise ValueError("HL_ACCOUNT_ADDRESS is required")
@@ -304,11 +305,21 @@ class HyperliquidAdapter:
         for coin in coins:
             if coin not in self._decimals:
                 continue
-            book = await asyncio.to_thread(self.info.l2_snapshot, coin)
+            try:
+                book = await asyncio.to_thread(self.info.l2_snapshot, coin)
+            except Exception:  # noqa: BLE001 - a 429 or a timeout: the coin waits a tick
+                self.quote_errors += 1
+                continue
             levels = book.get("levels", [[], []])
             if levels[0] and levels[1]:
                 out[coin] = Quote(float(levels[0][0]["px"]), float(levels[1][0]["px"]))
         return out
+
+    async def schedule_cancel_all(self, at_ms: int) -> None:
+        """Venue dead-man switch: Hyperliquid cancels all the account's open orders at ``at_ms``."""
+        res = await asyncio.to_thread(self.exchange.schedule_cancel, at_ms)
+        if not isinstance(res, dict) or res.get("status") != "ok":
+            raise RuntimeError(f"scheduleCancel refused: {res}")
 
     async def capital_flows(self, start_ms: int) -> tuple[list[tuple[int, float, str]], list[str]]:
         """Deposits, withdrawals and transfers of the account since ``start_ms`` (parse_ledger)."""

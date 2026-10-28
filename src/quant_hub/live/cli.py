@@ -19,7 +19,8 @@ import asyncio
 import json
 import os
 import sys
-from datetime import UTC, datetime
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from quant_hub.live.contracts import (
@@ -46,7 +47,9 @@ def make_notifier():
     return LogNotifier()
 
 
-def make_adapter(book: Book, mode: str, store: Store, writer: bool = True):
+def make_adapter(
+    book: Book, mode: str, store: Store, writer: bool = True, copy_prices: dict | None = None
+):
     if mode == "live":
         from quant_hub.live.adapters.hyperliquid import HyperliquidAdapter
 
@@ -55,9 +58,35 @@ def make_adapter(book: Book, mode: str, store: Store, writer: bool = True):
         from quant_hub.live.adapters.paper_hl import PaperOnHyperliquid
 
         return PaperOnHyperliquid(
-            book.book_id, store, float(os.environ.get("PAPER_EQUITY", "1000")), writer=writer
+            book.book_id,
+            store,
+            float(os.environ.get("PAPER_EQUITY", "1000")),
+            writer=writer,
+            copy_prices=copy_prices,
         )
     raise ValueError(mode)
+
+
+UPSTREAM_DONE = {"done", "closed", "halted", "mismatch", "no_weights", "invalid_weights", "error"}
+
+
+def cascade_prices(store: Store, book: Book, as_of: str, mode: str, log, poll_s: float = 15.0):
+    """Paper cascade: wait for the upstream books' sessions, then their fill prices (price_from)."""
+    if mode != "paper":
+        log.warning("price_from is paper only; ignored in %s mode", mode)
+        return {}
+    from quant_hub.live.adapters.paper_hl import upstream_prices
+
+    deadline = book.window(as_of)[0] + timedelta(minutes=book.price_from_wait_minutes)
+    for up in book.price_from:
+        while datetime.now(UTC) < deadline:
+            raw = store.get(state_key(up, as_of))
+            if raw and json.loads(raw).get("status") in UPSTREAM_DONE:
+                break
+            time.sleep(poll_s)
+    prices = upstream_prices(store, list(book.price_from), as_of)
+    log.info("cascade: %d coins at the fill prices of %s", len(prices), ", ".join(book.price_from))
+    return prices
 
 
 def cmd_run(args) -> int:
@@ -67,7 +96,8 @@ def cmd_run(args) -> int:
     store = make_store()
     log_key = f"logs/{book.book_id}_{args.date}.jsonl"
     log = get_logger("quant_hub.live", Path(store.root) / log_key)
-    adapter = make_adapter(book, args.mode, store)
+    copy = cascade_prices(store, book, args.date, args.mode, log) if book.price_from else {}
+    adapter = make_adapter(book, args.mode, store, copy_prices=copy)
     session = Session(book, store, adapter, args.date, notifier=make_notifier(), log=log)
     try:
         summary = asyncio.run(session.run())
@@ -167,6 +197,7 @@ def cmd_riskwatch(args) -> int:
         evaluate_book,
         evaluate_health,
         evaluate_listing,
+        evaluate_open_orders,
         risk_key,
     )
 
@@ -208,6 +239,10 @@ def cmd_riskwatch(args) -> int:
         account.equity, account.positions, mids, day, book.max_abs_weight, book.max_gross
     )
     alerts += evaluate_health(health, day, now_ms)
+    start, end = book.window(args.date)
+    in_window = start <= datetime.now(UTC) < end + timedelta(minutes=3)
+    stray = evaluate_open_orders(account.open_orders, in_window, day)
+    alerts += stray
     unlisted = evaluate_listing(account.positions, listed, day)
     alerts += unlisted
     store.put(key, day.to_json())
@@ -231,7 +266,7 @@ def cmd_riskwatch(args) -> int:
     if info:
         asyncio.run(make_notifier().send("info", f"{book.book_id}: capital", "\n".join(info)))
     if alerts:
-        level = "critical" if stop or unlisted else "warning"
+        level = "critical" if stop or unlisted or stray else "warning"
         asyncio.run(make_notifier().send(level, f"{book.book_id}: risk check", "\n".join(alerts)))
     return 0
 

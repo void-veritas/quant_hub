@@ -7,6 +7,7 @@ looking; this check reads the account once an hour and tells the owner when:
 - equity has fallen 2%, 3% or 5% since the first check of the UTC day (one message
   per level per day, so a slow bleed does not flood the chat);
 - a coin's weight has drifted past 1.5x the passport clamp (a price move made it big);
+- orders are resting outside the execution window (a session died with orders out);
 - gross exposure is above 1.2x the passport's max_gross;
 - (live) margin in use is above half the account value, or the API wallet expires
   within 14 days (once a day each: an expired key stops every session);
@@ -175,6 +176,22 @@ def evaluate_listing(positions: dict[str, float], listed: set[str], day: DayRisk
             )
             day.alerted.add(f"unlisted:{coin}")
     return out
+
+
+def evaluate_open_orders(open_orders: list, in_window: bool, day: DayRisk) -> list[str]:
+    """Orders resting outside the execution window (a crashed or killed session): once a day.
+
+    The session cancels everything at its end and the venue's dead-man cancel fires 2 minutes
+    after the window; anything still resting after that needs a person (cancel-all).
+    """
+    if in_window or not open_orders or "open_orders" in day.alerted:
+        return []
+    day.alerted.add("open_orders")
+    coins = sorted({str(o.get("coin")) for o in open_orders})
+    return [
+        f"{len(open_orders)} orders resting outside the window ({', '.join(coins)}): "
+        "run cancel-all for this book"
+    ]
 
 
 def evaluate_health(health: dict, day: DayRisk, now_ms: int) -> list[str]:

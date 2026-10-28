@@ -12,7 +12,7 @@ import io
 import json
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -40,7 +40,7 @@ from quant_hub.live.store import Store
 
 @dataclass
 class SessionSummary:
-    status: str  # done | no_weights | invalid_weights | halted | closed | mismatch
+    status: str  # done | no_weights | invalid_weights | halted | closed | mismatch | error
     n_fills: int = 0
     completion: float = 0.0  # 1 - remaining gross / planned gross
     fees: float = 0.0
@@ -286,6 +286,22 @@ class Session:
                 self._log("stream reconnected")
 
     # ------------------------------------------------------------------ orders
+    async def _arm_dead_man(self) -> None:
+        """Ask the venue to cancel all our orders shortly after the window, whatever happens here.
+
+        If the server dies mid-session nothing would cancel the resting limits; Hyperliquid's
+        scheduleCancel does it at window end + 2 minutes (live only: adapters without it skip).
+        """
+        arm = getattr(self.adapter, "schedule_cancel_all", None)
+        if arm is None:
+            return
+        at = self.end + timedelta(minutes=2)
+        try:
+            await arm(int(at.timestamp() * 1000))
+            self._log("dead-man cancel armed", at=at.isoformat())
+        except Exception as err:  # noqa: BLE001 - trading goes on, the owner is told
+            await self._alert("warning", "venue dead-man cancel not armed", repr(err)[:200])
+
     async def _cancel_all(self) -> None:
         for o in self.oms.open_orders():
             ok = await self.adapter.cancel(o)
@@ -469,6 +485,7 @@ class Session:
                 return self.summary()
             self.status = "running"
             self._persist()
+            await self._arm_dead_man()
             await self._alert(
                 "info",
                 "session started",
@@ -529,5 +546,15 @@ class Session:
                 f"maker {s.maker_share:.0%}, fees {s.fees:.2f}",
             )
             return s
+        except Exception as err:
+            # anything unexpected (an API error, a bug): leave nothing resting on the venue
+            try:
+                await self._cancel_all()
+            except Exception as cancel_err:  # noqa: BLE001 - the venue's dead-man switch is the backstop
+                self._log("cancel after crash failed", logging.ERROR, error=str(cancel_err))
+            self.status = "error"
+            self._persist()
+            await self._alert("critical", "session crashed, our orders cancelled", repr(err)[:300])
+            raise
         finally:
             await self.adapter.close()
