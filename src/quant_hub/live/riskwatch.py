@@ -35,8 +35,13 @@ MARGIN_MAX = 0.5  # share of account value in use as margin
 AGENT_WARN_DAYS = 14
 
 
-def risk_key(book_id: str, as_of: str) -> str:
-    return f"state/{book_id}/risk_{as_of}.json"
+def risk_key(book_id: str, as_of: str, mode: str = "paper") -> str:
+    """The day's baseline and sent alerts, one file per mode (like ``capital_key``).
+
+    The live account must not be compared with the paper equity of the same morning.
+    """
+    tag = "" if mode == "paper" else f"{mode}_"
+    return f"state/{book_id}/risk_{tag}{as_of}.json"
 
 
 @dataclass

@@ -1090,3 +1090,12 @@ def test_riskwatch_flags_orders_resting_outside_the_window_once_a_day():
     first = evaluate_open_orders(orders, in_window=False, day=day)
     assert len(first) == 1 and "BTC, ETH" in first[0]
     assert evaluate_open_orders(orders, in_window=False, day=day) == []  # once a day
+
+
+def test_the_day_baseline_is_kept_per_mode():
+    from quant_hub.live.riskwatch import capital_key, risk_key
+
+    # 2026-10-29: the live check compared $750 live with the $800 paper baseline of the same morning
+    assert risk_key("b", AS_OF) == f"state/b/risk_{AS_OF}.json"  # paper keeps its old files
+    assert risk_key("b", AS_OF, "live") != risk_key("b", AS_OF, "paper")
+    assert capital_key("b", "live") != capital_key("b", "paper")

@@ -227,7 +227,7 @@ def cmd_riskwatch(args) -> int:
             await adapter.close()
 
     account, mids, (flows, unknown), health, listed = asyncio.run(snap())
-    key = risk_key(book.book_id, args.date)
+    key = risk_key(book.book_id, args.date, args.mode)
     raw = store.get(key)
     day = DayRisk.from_json(raw) if raw else DayRisk(account.equity)
     if cap is None:  # first check in this mode: the ledger counts from now
