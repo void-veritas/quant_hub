@@ -300,6 +300,11 @@ class Session:
             await arm(int(at.timestamp() * 1000))
             self._log("dead-man cancel armed", at=at.isoformat())
         except Exception as err:  # noqa: BLE001 - trading goes on, the owner is told
+            if "enough volume" in str(err):
+                # HL arms it only after $1M traded (2026-10-30: "Required: $1000000"); known and
+                # covered by riskwatch's orders-outside-the-window alert, so the log is enough
+                self._log("dead-man cancel needs more traded volume", error=str(err)[:200])
+                return
             await self._alert("warning", "venue dead-man cancel not armed", repr(err)[:200])
 
     async def _cancel_all(self) -> None:

@@ -1099,3 +1099,17 @@ def test_the_day_baseline_is_kept_per_mode():
     assert risk_key("b", AS_OF) == f"state/b/risk_{AS_OF}.json"  # paper keeps its old files
     assert risk_key("b", AS_OF, "live") != risk_key("b", AS_OF, "paper")
     assert capital_key("b", "live") != capital_key("b", "paper")
+
+
+def test_dead_man_refused_for_volume_is_logged_not_alerted(tmp_path):
+    store, clock, ex = setup(tmp_path, {"BTC": 0.2, "ETH": -0.2})
+
+    async def refuse(at_ms):
+        raise RuntimeError(
+            "scheduleCancel refused: Cannot set scheduled cancel time until enough volume traded."
+        )
+
+    ex.schedule_cancel_all = refuse
+    note = LogNotifier()
+    run(session(book(), store, ex, clock, notifier=note))
+    assert not any("dead-man" in title for _, title, _ in note.sent)
