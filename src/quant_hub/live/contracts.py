@@ -144,7 +144,11 @@ def validate_weights(
         problems.append("produced_at is naive (must be UTC)")
     else:
         age = now - produced
-        if age > timedelta(minutes=book.weights_max_age_minutes) or age < timedelta(minutes=-5):
+        # a cascade book (price_from) opens its file only after waiting for its upstream books
+        # (2026-11-01: rejected at 09:40 as 38 minutes old): the wait does not age the weights
+        wait = book.price_from_wait_minutes if book.price_from else 0
+        max_age = book.weights_max_age_minutes + wait
+        if age > timedelta(minutes=max_age) or age < timedelta(minutes=-5):
             problems.append(f"produced_at {wf.produced_at} is stale ({age} old)")
     if not wf.weights:
         problems.append("no weights")

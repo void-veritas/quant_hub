@@ -1113,3 +1113,16 @@ def test_dead_man_refused_for_volume_is_logged_not_alerted(tmp_path):
     note = LogNotifier()
     run(session(book(), store, ex, clock, notifier=note))
     assert not any("dead-man" in title for _, title, _ in note.sent)
+
+
+def test_a_cascade_wait_does_not_age_the_weights():
+    from quant_hub.live.contracts import validate_weights
+
+    wf = weights_file({"BTC": 0.1}, produced_at=START + timedelta(minutes=1, seconds=43))
+    at_0940 = START + timedelta(minutes=40)  # 2026-11-01: opened after waiting for the live book
+    stale = [p for p in validate_weights(wf, book(), at_0940) if "stale" in p]
+    assert stale  # a book that does not wait keeps the 30-minute limit
+    cascade = book(price_from=["yolo10_daily"], price_from_wait_minutes=40)
+    assert not [p for p in validate_weights(wf, cascade, at_0940) if "stale" in p]
+    yesterday = weights_file({"BTC": 0.1}, produced_at=START - timedelta(hours=3))
+    assert [p for p in validate_weights(yesterday, cascade, at_0940) if "stale" in p]
