@@ -1126,3 +1126,23 @@ def test_a_cascade_wait_does_not_age_the_weights():
     assert not [p for p in validate_weights(wf, cascade, at_0940) if "stale" in p]
     yesterday = weights_file({"BTC": 0.1}, produced_at=START - timedelta(hours=3))
     assert [p for p in validate_weights(yesterday, cascade, at_0940) if "stale" in p]
+
+
+def test_a_one_lot_trade_survives_float_noise():
+    """2026-11-01: target 0.05 ZEC, position 0.06: the gap -0.0099999... was rounded down to 0."""
+    assert round_size(0.05 - 0.06, 2) == 0.01
+    assert round_size(0.0099, 2) == 0.0  # a genuinely smaller size still rounds down
+    pol = RebalancePolicy(book(), {"ZEC": 2})
+    plan = pol.step(
+        START + timedelta(seconds=10),
+        START,
+        START + timedelta(hours=1),
+        {"ZEC": 0.05},
+        {"ZEC": 0.06},
+        {"ZEC": Quote(1246.0, 1247.0)},
+        OMS("yolo10_daily", AS_OF),
+        {},
+        0.0,
+        1.0,
+    )
+    assert [(i.coin, i.side, i.size) for i in plan.send] == [("ZEC", "sell", 0.01)]

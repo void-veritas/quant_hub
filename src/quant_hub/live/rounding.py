@@ -39,7 +39,10 @@ def round_price(px: float, sz_decimals: int, side: str, passive: bool = True) ->
 
 def round_size(size: float, sz_decimals: int) -> float:
     q = Decimal(1).scaleb(-sz_decimals)
-    return float(Decimal(repr(abs(size))).quantize(q, rounding=ROUND_DOWN))
+    # strip float noise before rounding down: 0.05 - 0.06 = -0.009999999999999995 must be one lot of
+    # 0.01, not zero (2026-11-01: a whole ZEC trade of one lot was never sent)
+    clean = round(abs(size), sz_decimals + 8)
+    return float(Decimal(repr(clean)).quantize(q, rounding=ROUND_DOWN))
 
 
 def tick(px: float, sz_decimals: int) -> float:
