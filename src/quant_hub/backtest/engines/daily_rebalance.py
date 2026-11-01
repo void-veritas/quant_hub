@@ -60,7 +60,9 @@ def apply_venue_constraints(
     tgt = target_positions.copy()
     if lot_sizes is not None:
         step = np.where(lot_sizes > 0, lot_sizes, np.nan)
-        rounded = np.trunc(tgt / step) * step
+        # float noise first: 0.29 / 0.01 = 28.999999999999996 must stay 29 lots (the executor's
+        # round_size had the same trap, 2026-11-01)
+        rounded = np.trunc(np.round(tgt / step, 8)) * step
         tgt = np.where(np.isnan(step), tgt, rounded)
     if min_notional > 0:
         order_value = np.abs((tgt - current_positions) * prices)
