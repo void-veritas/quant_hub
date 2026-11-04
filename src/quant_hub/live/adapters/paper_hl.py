@@ -8,6 +8,10 @@ Like a real account, the paper equity is marked to market (held coins are quoted
 connect, before the first snapshot) and pays or earns Hyperliquid's hourly funding on
 its positions between connects (``fundingHistory``, notional at the current mid; a long
 pays a positive rate). The first connect of an account starts the funding clock.
+
+A paper deposit (``deposit``, the ``paper-deposit`` command) adds cash to the account and is
+recorded in it; ``capital_flows`` hands it to riskwatch like a live ledger entry, so it is
+counted as capital, not performance.
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ class PaperOnHyperliquid:
         self.connected = False
         self.funding_until_ms = 0  # funding settled up to here (ms)
         self.funding_paid = 0.0  # cumulative, positive = paid by the account
+        self.deposits: list[list] = []  # [time_ms, usd, "paper deposit"]
         # only the session writes the account: riskwatch (hourly, also at 09:30 inside the window)
         # reads it, marks it and accrues funding in memory, and never overwrites the session's fills
         self.writer = writer
@@ -65,6 +70,7 @@ class PaperOnHyperliquid:
             self.paper._cost_basis = {k: float(v) for k, v in acc.get("cost_basis", {}).items()}
             self.funding_until_ms = int(acc.get("funding_until_ms") or 0)
             self.funding_paid = float(acc.get("funding_paid", 0.0))
+            self.deposits = [list(d) for d in acc.get("deposits", [])]
         held = [c for c, q in self.paper.positions.items() if q]
         if held:  # mark to market before anyone reads the equity
             self.paper.set_quotes(await self.feed.quotes(held))
@@ -107,10 +113,25 @@ class PaperOnHyperliquid:
                     "cost_basis": self.paper._cost_basis,
                     "funding_until_ms": self.funding_until_ms,
                     "funding_paid": self.funding_paid,
+                    "deposits": self.deposits,
                 },
                 sort_keys=True,
             ),
         )
+
+    def deposit(self, usd: float, now_ms: int | None = None) -> None:
+        """Add cash to the paper account (capital, not performance); writers only."""
+        if not (self.writer and self.connected):
+            raise RuntimeError("paper deposit needs a connected writer")
+        if usd <= 0:
+            raise ValueError("paper deposit must be positive")
+        self.paper.equity += usd
+        self.deposits.append([now_ms or int(time.time() * 1000), float(usd), "paper deposit"])
+        self._save()
+
+    async def capital_flows(self, since_ms: int) -> tuple[list[tuple[int, float, str]], list[str]]:
+        """Deposits after ``since_ms``, in the shape of the live ledger (riskwatch)."""
+        return [(int(t), float(u), str(k)) for t, u, k in self.deposits if int(t) > since_ms], []
 
     def sz_decimals(self) -> dict[str, int]:
         return self.paper.sz_decimals()

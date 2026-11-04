@@ -1005,6 +1005,46 @@ def test_paper_account_is_marked_to_market_and_pays_funding(tmp_path):
     assert session.feed.calls[0][1] == 1_001  # from the last settlement, not from the start of time
 
 
+def test_paper_deposit_is_capital_for_riskwatch_not_performance(tmp_path):
+    from quant_hub.live.adapters.paper_hl import PaperOnHyperliquid
+    from quant_hub.live.riskwatch import BookRisk, DayRisk
+
+    store = Store(tmp_path)
+    acc = {"equity": 800.0, "cash_pnl": 5.0, "positions": {}, "cost_basis": {}}
+    store.put("paper/b/account.json", json.dumps(acc))
+
+    def connected(writer):
+        a = PaperOnHyperliquid("b", store, 800.0, writer=writer)
+        a.feed = _Feed()
+        asyncio.run(a.connect())
+        return a
+
+    reader = connected(writer=False)
+    with pytest.raises(RuntimeError):
+        reader.deposit(100.0)  # riskwatch's read-only account cannot deposit
+    a = connected(writer=True)
+    a.deposit(10_000.0 - 805.0, now_ms=5_000)
+    assert asyncio.run(a.snapshot()).equity == pytest.approx(10_000.0)
+    again = connected(writer=False)  # the deposit is saved in the account
+    assert asyncio.run(again.snapshot()).equity == pytest.approx(10_000.0)
+    flows, unknown = asyncio.run(again.capital_flows(1_000))
+    assert flows == [(5_000, 9_195.0, "paper deposit")] and unknown == []
+    assert asyncio.run(again.capital_flows(5_000)) == ([], [])  # read already
+    cap, day = BookRisk(800.0, 820.0, since_ms=1_000), DayRisk(805.0)
+    cap.apply_flows(flows, day)
+    assert (cap.start, cap.peak, day.baseline) == (9_995.0, 10_015.0, 10_000.0)
+
+
+def test_paper_deposit_command_refuses_a_live_executor(monkeypatch, tmp_path):
+    from quant_hub.live.cli import main
+
+    monkeypatch.setenv("MODE", "live")
+    monkeypatch.setenv("LIVE_STORE", str(tmp_path))
+    assert (
+        main(["paper-deposit", "--book", "x.yaml", "--to", "10000"]) == 1
+    )  # before reading anything
+
+
 # ---------------------------------------------------------------- robustness and the paper cascade
 
 

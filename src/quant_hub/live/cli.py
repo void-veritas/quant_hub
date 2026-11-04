@@ -5,6 +5,7 @@
     python -m quant_hub.live status --book books/yolo_daily.yaml [--date ...]
     python -m quant_hub.live cancel-all --book books/yolo_daily.yaml  (live: cancel our orders)
     python -m quant_hub.live pause|resume|kill|unkill --book ...           (flags in the store)
+    python -m quant_hub.live paper-deposit --book ... --to 10000  (paper top-up = capital)
 
 Store root and bucket come from ``LIVE_STORE`` and ``LIVE_BUCKET``; paper equity from
 ``PAPER_EQUITY``. Without ``--mode`` the mode comes from ``MODE`` (default paper), so each
@@ -217,7 +218,7 @@ def cmd_riskwatch(args) -> int:
             quotes = await adapter.quotes(sorted(first.positions)) if first.positions else {}
             # paper equity marks to the quotes just loaded, so read the account again
             account = (await adapter.snapshot()) if quotes else first
-            ledger = getattr(adapter, "capital_flows", None)  # live only: paper has no deposits
+            ledger = getattr(adapter, "capital_flows", None)  # live ledger, paper deposits
             flows = await ledger(cap.since_ms) if ledger and cap else ([], [])
             check = getattr(adapter, "health", None)  # live only
             health = await check() if check else {}
@@ -271,6 +272,42 @@ def cmd_riskwatch(args) -> int:
     return 0
 
 
+def cmd_paper_deposit(args) -> int:
+    """Top a paper account up to ``--to`` USD of marked equity (outside the window, paper only)."""
+    if os.environ.get("MODE", "paper") != "paper":
+        print("refused: MODE is not paper, a deposit is only for a paper account")
+        return 1
+    book = Book.from_yaml(args.book)
+    now = datetime.now(UTC)
+    start, end = book.window(now.strftime("%Y-%m-%d"))
+    if start - timedelta(minutes=30) <= now < end + timedelta(minutes=10):
+        print(f"refused: inside the session window {start:%H:%M}-{end:%H:%M} UTC (+-margin)")
+        return 1
+    store = make_store()
+
+    async def go():
+        a = make_adapter(book, "paper", store, writer=True)
+        await a.connect()  # marks the positions and settles funding first
+        try:
+            before = (await a.snapshot()).equity
+            usd = args.to - before
+            if usd <= 0:
+                return before, 0.0
+            a.deposit(usd)
+            return before, usd
+        finally:
+            await a.close()
+
+    before, usd = asyncio.run(go())
+    if usd <= 0:
+        print(f"nothing to do: equity {before:.2f} >= {args.to:.2f}")
+        return 0
+    msg = f"paper deposit {usd:+.2f} USD: equity {before:.2f} -> {before + usd:.2f}"
+    print(msg)
+    asyncio.run(make_notifier().send("info", f"{book.book_id}: capital", msg))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="quant_hub.live")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -294,6 +331,9 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument(
                 "--mode", choices=["paper", "live"], default=os.environ.get("MODE", "paper")
             )
+    p = sub.add_parser("paper-deposit")
+    p.add_argument("--book", required=True)
+    p.add_argument("--to", type=float, required=True, help="target marked equity, USD")
     return ap
 
 
@@ -305,6 +345,7 @@ def main(argv=None) -> int:
         "status": cmd_status,
         "cancel-all": cmd_cancel_all,
         "riskwatch": cmd_riskwatch,
+        "paper-deposit": cmd_paper_deposit,
     }.get(args.cmd, cmd_flag)(args)
 
 
