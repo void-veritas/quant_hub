@@ -150,6 +150,7 @@ class CommandPoller:
             lines.append(
                 f"{b}: {st.get('status')} phase={st.get('phase')} fills={s.get('n_fills', 0)} "
                 f"done={s.get('completion', 0):.0%} slip={s.get('slippage_bps', 0):.1f}bps"
+                + (f" dust={s['n_dust']}" if s.get("n_dust") else "")
                 + (f" HALT: {st.get('halt_reason')}" if st.get("halt_reason") else "")
             )
             if self.store.exists(pause_key(b)):

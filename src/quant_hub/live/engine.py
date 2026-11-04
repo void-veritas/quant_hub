@@ -42,12 +42,16 @@ from quant_hub.live.store import Store
 class SessionSummary:
     status: str  # done | no_weights | invalid_weights | halted | closed | mismatch | error
     n_fills: int = 0
-    completion: float = 0.0  # 1 - remaining gross / planned gross
+    completion: float = (
+        0.0  # share of the tradable plan filled: dust below the venue minimum excluded
+    )
     fees: float = 0.0
     slippage_bps: float = 0.0  # notional-weighted, signed vs decision price (positive = cost)
     maker_share: float = 0.0
     planned_gross: float = 0.0
     filled_gross: float = 0.0
+    n_dust: int = 0  # names left with a gap below min_notional that cannot be sent (note 043)
+    dust_gross: float = 0.0  # $ of those gaps
     halt_reason: str = ""
     rejected: int = 0
     foreign_messages: int = 0
@@ -400,11 +404,20 @@ class Session:
                     sgn = 1 if f.side == "buy" else -1
                     slip += sgn * (f.price / d - 1) * 1e4 * f.size * f.price
             slip /= gross
-        remaining = sum(
-            abs(t - self.positions().get(c, 0.0)) * self.decision_px.get(c, 0.0)
-            for c, t in self.targets.items()
-        )
-        completion = 1 - remaining / self.planned_gross if self.planned_gross > 0 else 1.0
+        pos = self.positions()
+        remaining = dust = 0.0
+        n_dust = 0
+        for c, t in self.targets.items():
+            gap = abs(t - pos.get(c, 0.0)) * self.decision_px.get(c, 0.0)
+            remaining += gap
+            full_close = (
+                t == 0 and pos.get(c, 0.0) != 0
+            )  # sendable below the minimum as reduce-only
+            if 1e-9 < gap < self.book.min_notional and not full_close:
+                dust += gap
+                n_dust += 1
+        tradable = self.planned_gross - dust
+        completion = 1 - (remaining - dust) / tradable if tradable > 1e-9 else 1.0
         return SessionSummary(
             status=self.status,
             n_fills=len(fills),
@@ -416,6 +429,8 @@ class Session:
             else 0.0,
             planned_gross=self.planned_gross,
             filled_gross=gross,
+            n_dust=n_dust,
+            dust_gross=dust,
             halt_reason=self.risk.state.halt_reason if self.risk else "",
             rejected=len(self.risk.state.rejected) if self.risk else 0,
             foreign_messages=self.oms.foreign,
@@ -544,11 +559,16 @@ class Session:
             self._write_fills()
             s = self.summary()
             self._persist(s)
+            dust = ""
+            if s.n_dust:
+                dust = (
+                    f" ({s.n_dust} below ${self.book.min_notional:.0f} left, ${s.dust_gross:.2f})"
+                )
             await self._alert(
                 "info" if s.status == "done" else "warning",
                 f"session {s.status}",
-                f"fills {s.n_fills}, done {s.completion:.0%}, slippage {s.slippage_bps:.1f} bps, "
-                f"maker {s.maker_share:.0%}, fees {s.fees:.2f}",
+                f"fills {s.n_fills}, done {s.completion:.0%}{dust}, slippage {s.slippage_bps:.1f} "
+                f"bps, maker {s.maker_share:.0%}, fees {s.fees:.2f}",
             )
             return s
         except Exception as err:

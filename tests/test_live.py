@@ -169,6 +169,27 @@ def test_cloid_deterministic_and_oms_rejects_foreign():
 # ---------------------------------------------------------------- sessions
 
 
+def test_completion_leaves_out_dust(tmp_path):
+    # SOL's target is ~$5, below the $10 venue minimum: it cannot be sent, so it is not owed
+    store, clock, ex = setup(tmp_path, {"BTC": 0.2, "ETH": -0.2, "SOL": 0.0005})
+
+    def drift(now):
+        if now >= START + timedelta(minutes=1):
+            ex.set_quotes(
+                {
+                    "BTC": Quote(99_900.0, 99_920.0),
+                    "ETH": Quote(4_010.0, 4_012.0),
+                    "SOL": Quote(149.80, 149.90),
+                }
+            )
+
+    clock.on_advance = drift
+    s = run(session(book(), store, ex, clock))
+    assert s.status == "done" and s.completion > 0.99
+    assert s.n_dust == 1 and 0 < s.dust_gross < 10
+    assert "SOL" not in {o.coin for o in ex.placed}
+
+
 def test_happy_path_passive_fills(tmp_path):
     store, clock, ex = setup(tmp_path, {"BTC": 0.2, "ETH": -0.2, "SOL": 0.1})
     bk = book()
