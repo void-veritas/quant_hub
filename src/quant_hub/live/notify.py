@@ -8,6 +8,7 @@ resuming is a shell operation on the host, by design.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from dataclasses import dataclass
@@ -41,10 +42,19 @@ class LogNotifier:
 class TelegramNotifier:
     """Outbound alerts through the Bot API. Token and chat id come from the environment."""
 
-    def __init__(self, token: str | None = None, chat_id: str | None = None, timeout: float = 10.0):
+    def __init__(
+        self,
+        token: str | None = None,
+        chat_id: str | None = None,
+        timeout: float = 10.0,
+        retry_pause: float = 2.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
         self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
         self.timeout = timeout
+        self.retry_pause = retry_pause
+        self.transport = transport  # tests
         if not self.token or not self.chat_id:
             raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
 
@@ -55,11 +65,25 @@ class TelegramNotifier:
     async def send(self, level: str, title: str, text: str = "") -> None:
         icon = {"info": "i", "warning": "!", "critical": "!!!"}.get(level, "?")
         body = f"[{icon}] {title}\n{text}".strip()
-        async with httpx.AsyncClient(timeout=self.timeout) as c:
-            r = await c.post(
-                f"{self._base}/sendMessage", json={"chat_id": self.chat_id, "text": body[:4000]}
-            )
-            r.raise_for_status()
+        last = ""
+        for attempt in range(2):  # one quick retry: Telegram drops a request now and then
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as c:
+                    r = await c.post(
+                        f"{self._base}/sendMessage",
+                        json={"chat_id": self.chat_id, "text": body[:4000]},
+                    )
+                if r.is_success:
+                    return
+                last = f"HTTP {r.status_code}"
+                if r.status_code < 500 and r.status_code != 429:
+                    break  # our request is wrong: a retry would fail the same way
+            except httpx.HTTPError as err:
+                last = type(err).__name__
+            if attempt == 0:
+                await asyncio.sleep(self.retry_pause)
+        # never the httpx message: its URL carries the bot token
+        raise RuntimeError(f"telegram sendMessage failed: {last}")
 
     async def send_photo(self, png: bytes, caption: str = "") -> None:
         async with httpx.AsyncClient(timeout=max(self.timeout, 30.0)) as c:

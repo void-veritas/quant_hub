@@ -1207,3 +1207,32 @@ def test_a_one_lot_trade_survives_float_noise():
         1.0,
     )
     assert [(i.coin, i.side, i.size) for i in plan.send] == [("ZEC", "sell", 0.01)]
+
+
+def test_telegram_send_retries_once_and_never_leaks_the_token():
+    import httpx
+
+    from quant_hub.live.notify import TelegramNotifier
+
+    calls = []
+
+    def flaky(request):
+        calls.append(request)
+        if len(calls) == 1:
+            raise httpx.ConnectError("boom", request=request)
+        return httpx.Response(200, json={"ok": True})
+
+    tg = TelegramNotifier("SECRET-TOKEN", "1", retry_pause=0, transport=httpx.MockTransport(flaky))
+    asyncio.run(tg.send("info", "session started", "10 names"))
+    assert len(calls) == 2
+
+    calls.clear()
+    bad = TelegramNotifier(
+        "SECRET-TOKEN",
+        "1",
+        retry_pause=0,
+        transport=httpx.MockTransport(lambda r: calls.append(r) or httpx.Response(400)),
+    )
+    with pytest.raises(RuntimeError) as err:
+        asyncio.run(bad.send("info", "x"))
+    assert len(calls) == 1 and "SECRET" not in str(err.value) and "HTTP 400" in str(err.value)

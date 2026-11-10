@@ -105,7 +105,7 @@ class Session:
         try:
             await self.notifier.send(level, f"{self.book.book_id} {self.as_of}: {title}", text)
         except Exception as err:  # alerts must never take the session down
-            self._log("notifier failed", logging.ERROR, error=str(err))
+            self._log("notifier failed", logging.ERROR, error=f"{type(err).__name__}: {err}")
 
     def positions(self) -> dict[str, float]:
         """Ledger positions: start of session plus what we filled."""
