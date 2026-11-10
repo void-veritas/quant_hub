@@ -19,6 +19,20 @@ Coverage on 2026-10-12 (`quant_hub.data.storage.coverage(dataset)` prints the li
 | `hl_l2_hour` | hyperliquid | 94 | 2023-04-15 | 2026-10-08 | `hyperliquid-archive` S3 (requester pays) | 09:00 decision mid, spread, depth |
 | `open_interest`, `liquidations`, `exchanges`, `hyperliquid` | | | | | | empty placeholders |
 
+Hyperliquid fills, for the microstructure research (yolo-microstructure notes 051–054). Layout
+`data/raw/<dataset>/date=<YYYYMMDD>/<HH>.parquet`, one file per hour, written by
+`research/liquidations/extract_node_fills.py` and `cascade_execution.py` there, not by the ingestion CLI:
+
+| dataset | coverage | rows | source |
+|---|---|---|---|
+| `hl_liquidations` | 2025-07-27 08:00 → 2026-11-07, 11 248 hours | one per liquidated fill, from the liquidated account's side | `hl-mainnet-node-data/node_fills_by_block` (requester pays) |
+| `hl_flow_1m` | same | per coin and minute: taker buy and sell notional, trades, vwap, last price, liquidated notional per side | same |
+| `hl_taker_fills_hip3` | 955 hours around the 720 HIP-3 forced-selling events | every taker fill of the event markets (price, size, side, user, order id, fee) | same |
+
+The raw hours themselves are kept as downloaded in `s3://yolo-research-ep/raw_archive/hl_node_fills/`
+(storage class Deep Archive, ~12 h to restore). `sync` mirrors only `raw/` and `external/` and never
+touches `raw_archive/` or the live store (`weights/`, `state/`, `fills/`, ...) in the same bucket.
+
 External layer (`data/external`, synced like raw): `rw/` (RW bulk files; `coincodex_marketcap.feather` is
 frozen at 2026-01-22, RW no longer updates it), `coincodex/` (its continuation from CoinCodex's public
 endpoints: `tickers.csv`, `marketcap_daily.parquet`; `python -m quant_hub.data.marketcap cx-snapshot` daily),
