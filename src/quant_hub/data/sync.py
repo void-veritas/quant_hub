@@ -64,7 +64,14 @@ class _Remote:
     sha: str | None = None  # filled lazily from object metadata
 
 
-def _remote_index(s3, bucket: str, dataset: str | None) -> dict[str, _Remote]:
+def _remote_index(
+    s3, bucket: str, dataset: str | None, prefixes: tuple[str, ...] = PREFIXES
+) -> dict[str, _Remote]:
+    """Objects of the mirrored layers only.
+
+    The bucket also holds the live store (weights/, state/, ...) and a Deep Archive copy of raw
+    downloads (raw_archive/), which are not part of the data mirror.
+    """
     idx: dict[str, _Remote] = {}
     prefix = f"raw/{dataset}/" if dataset else ""
     token = None
@@ -74,7 +81,8 @@ def _remote_index(s3, bucket: str, dataset: str | None) -> dict[str, _Remote]:
             kw["ContinuationToken"] = token
         r = s3.list_objects_v2(**kw)
         for o in r.get("Contents", []):
-            idx[o["Key"]] = _Remote(o["Size"], o["LastModified"])
+            if o["Key"].split("/", 1)[0] in prefixes:
+                idx[o["Key"]] = _Remote(o["Size"], o["LastModified"])
         if not r.get("IsTruncated"):
             return idx
         token = r["NextContinuationToken"]
@@ -108,7 +116,7 @@ def push(
     passes its own: raw / reference / curated).
     """
     s3 = s3 or _client()
-    remote = _remote_index(s3, bucket, dataset)
+    remote = _remote_index(s3, bucket, dataset, prefixes)
     local = _local_files(root, dataset, prefixes)
 
     def _decide(item):
@@ -162,7 +170,7 @@ def pull(
     a duplicate timestamp); a following `push` then uploads the union.
     """
     s3 = s3 or _client()
-    remote = _remote_index(s3, bucket, dataset)
+    remote = _remote_index(s3, bucket, dataset, prefixes)
     local = _local_files(root, None, prefixes)
 
     def _decide(key):

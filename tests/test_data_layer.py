@@ -260,6 +260,10 @@ def test_sync_compares_content_and_protects_local_changes(tmp_path):
     (f.parent / "data.parquet.lock").write_text("")
     f.unlink()
     assert sync.pull("b", root=root, s3=s3) == 1 and f.exists()
+    # objects outside the mirrored layers (live store, Deep Archive raw copies) are never pulled
+    s3.objects["raw_archive/hl_node_fills/20250727/8.lz4"] = (b"X", {}, pd.Timestamp.now(tz="UTC"))
+    s3.objects["weights/yolo10_daily/2026-11-10.json"] = (b"{}", {}, pd.Timestamp.now(tz="UTC"))
+    assert sync.pull("b", root=root, s3=s3) == 0 and not (root / "raw_archive").exists()
     assert sync.push("b", root=root, s3=s3, dry_run=True) == 0
 
 
