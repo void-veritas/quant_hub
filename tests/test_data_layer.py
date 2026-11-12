@@ -424,3 +424,21 @@ def test_binance_1d_rest_fills_what_the_dumps_lack(tmp_path, monkeypatch):
     monkeypatch.setattr(bnc, "fetch_klines_rest", blocked)
     inst2 = pd.DataFrame({"canonical_id": ["ETH"], "symbol": ["ETHUSDT"]})
     ingestion._ohlcv_binance_1d(inst2, date(2026, 10, 25), date(2026, 10, 27))  # no exception
+
+
+def test_home_follows_the_install(monkeypatch, tmp_path):
+    import importlib
+
+    from quant_hub.utils import config
+
+    try:
+        monkeypatch.setenv("QUANT_HUB_HOME", str(tmp_path))
+        assert importlib.reload(config).PROJECT_ROOT == tmp_path
+        monkeypatch.delenv("QUANT_HUB_HOME")
+        root = importlib.reload(config).PROJECT_ROOT  # this test runs from the checkout
+        assert (root / "src" / "quant_hub").is_dir()
+        monkeypatch.setattr(config, "_SOURCE_ROOT", tmp_path / "site-packages")  # as if installed
+        assert config._home() == config.Path.home() / ".quant_hub"
+    finally:
+        monkeypatch.delenv("QUANT_HUB_HOME", raising=False)
+        importlib.reload(config)

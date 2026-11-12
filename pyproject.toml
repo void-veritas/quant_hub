@@ -42,6 +42,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/quant_hub"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# the instrument registry ships with the package, for projects that install quant_hub as a dependency
+"config/instruments.csv" = "quant_hub/_config/instruments.csv"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]  # tests import helpers from each other (tests.test_data_layer._FakeS3)

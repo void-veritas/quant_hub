@@ -1,8 +1,13 @@
 """Project configuration: paths and environment variables.
 
-Secrets live in the gitignored `.env` at the repo root (template: `.env.example`).
-Call `get_env("FMP_API_KEY")` from anywhere — notebooks, connectors, scripts —
-and the .env file is loaded on first use.
+quant_hub is used two ways, and the home (data layer + `.env`) follows:
+
+- from its own checkout (`uv sync` here, the server image, CI): the checkout's root, as always;
+- installed as a dependency of another project (`uv add` from git): `~/.quant_hub`, one data layer
+  per machine that every project shares (`~/.quant_hub/data`, secrets in `~/.quant_hub/.env`).
+
+`QUANT_HUB_HOME` overrides both. Call `get_env("FMP_API_KEY")` from anywhere — notebooks,
+connectors, scripts — and the .env file is loaded on first use.
 """
 
 from __future__ import annotations
@@ -13,7 +18,18 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_SOURCE_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _home() -> Path:
+    if os.environ.get("QUANT_HUB_HOME"):
+        return Path(os.environ["QUANT_HUB_HOME"]).expanduser()
+    if (_SOURCE_ROOT / "pyproject.toml").exists() and (_SOURCE_ROOT / "src" / "quant_hub").is_dir():
+        return _SOURCE_ROOT  # a checkout of this repo (editable install)
+    return Path.home() / ".quant_hub"  # installed into another project's environment
+
+
+PROJECT_ROOT = _home()
 
 
 @lru_cache(maxsize=1)

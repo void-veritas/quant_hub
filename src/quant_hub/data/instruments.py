@@ -25,6 +25,8 @@ import pandas as pd
 from quant_hub.utils.config import PROJECT_ROOT
 
 INSTRUMENTS_PATH = PROJECT_ROOT / "config" / "instruments.csv"  # git-tracked seed
+if not INSTRUMENTS_PATH.exists():  # installed as a dependency: the copy shipped inside the package
+    INSTRUMENTS_PATH = Path(__file__).resolve().parents[1] / "_config" / "instruments.csv"
 LIVE_INSTRUMENTS_PATH = PROJECT_ROOT / "data" / "reference" / "instruments.csv"
 
 
