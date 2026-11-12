@@ -265,6 +265,11 @@ def test_sync_compares_content_and_protects_local_changes(tmp_path):
     s3.objects["weights/yolo10_daily/2026-11-10.json"] = (b"{}", {}, pd.Timestamp.now(tz="UTC"))
     assert sync.pull("b", root=root, s3=s3) == 0 and not (root / "raw_archive").exists()
     assert sync.push("b", root=root, s3=s3, dry_run=True) == 0
+    # a whole layer can be pulled on its own, a raw dataset alone stays within raw/
+    s3.objects["external/rw/x.feather"] = (b"E", {}, pd.Timestamp.now(tz="UTC"))
+    assert sync.pull("b", dataset="funding", root=root, s3=s3) == 0
+    assert sync.pull("b", dataset="external", root=root, s3=s3) == 1
+    assert (root / "external/rw/x.feather").exists()
 
 
 def test_health_report_flags_gaps_and_staleness(tmp_path):

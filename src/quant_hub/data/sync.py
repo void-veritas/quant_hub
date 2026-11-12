@@ -40,6 +40,11 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _scope(dataset: str, prefixes: tuple[str, ...]) -> str:
+    """Key prefix of a dataset: a raw dataset name, or a whole layer (``external``)."""
+    return f"{dataset}/" if dataset in prefixes else f"raw/{dataset}/"
+
+
 def _local_files(
     root: Path, dataset: str | None, prefixes: tuple[str, ...] = PREFIXES
 ) -> dict[str, Path]:
@@ -51,7 +56,7 @@ def _local_files(
         for p in base.rglob("*"):
             if p.is_file() and not p.name.startswith(".") and p.suffix not in SKIP_SUFFIXES:
                 rel = p.relative_to(root).as_posix()
-                if dataset and not rel.startswith(f"raw/{dataset}/"):
+                if dataset and not rel.startswith(_scope(dataset, prefixes)):
                     continue
                 out[rel] = p
     return out
@@ -73,7 +78,7 @@ def _remote_index(
     downloads (raw_archive/), which are not part of the data mirror.
     """
     idx: dict[str, _Remote] = {}
-    prefix = f"raw/{dataset}/" if dataset else ""
+    prefix = _scope(dataset, prefixes) if dataset else ""
     token = None
     while True:
         kw = dict(Bucket=bucket, Prefix=prefix, MaxKeys=1000)
@@ -255,7 +260,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("action", choices=["push", "pull"])
     ap.add_argument("--bucket", required=True)
-    ap.add_argument("--dataset", help="only raw/<dataset>/")
+    ap.add_argument("--dataset", help="only raw/<dataset>/, or a whole layer: --dataset external")
     ap.add_argument(
         "--force",
         action="store_true",
