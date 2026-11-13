@@ -165,13 +165,17 @@ def test_betas_to_a_benchmark_and_the_minimum_variance_hedge():
     rows = []
     for a, b in (("BTC", 1.0), ("ETH", 1.3), ("ZEC", 2.0)):
         r = b * m + rng.normal(0, 0.01 if a != "ZEC" else 0.04, len(dates))
-        rows += [dict(date=d, asset=a, price_returns=x, funding=0.0, in_universe=True) for d, x in zip(dates, r)]
+        rows += [
+            dict(date=d, asset=a, price_returns=x, funding=0.0, in_universe=True)
+            for d, x in zip(dates, r, strict=True)
+        ]
     df = pd.DataFrame(rows)
     hb = rolling_betas(df, window=90, benchmark="BTC")
     last = df["date"] == dates[-1]
-    got = dict(zip(df.loc[last, "asset"], hb[last]))
+    got = dict(zip(df.loc[last, "asset"], hb[last], strict=True))
     assert got["BTC"] == pytest.approx(1.0) and got["ETH"] == pytest.approx(1.3, abs=0.15)
-    w = pd.Series(np.where(df["asset"] == "ZEC", -0.10, np.where(df["asset"] == "ETH", 0.05, 0.02)), index=df.index)
+    zec, eth = df["asset"] == "ZEC", df["asset"] == "ETH"
+    w = pd.Series(np.where(zec, -0.10, np.where(eth, 0.05, 0.02)), index=df.index)
     out = neutralise(w, df["date"], "hedge", beta=hb, assets=df["asset"])
     # convictions untouched, only the BTC line moves, and the book's beta to BTC is zero
     assert (out[df["asset"] != "BTC"] == w[df["asset"] != "BTC"]).all()
