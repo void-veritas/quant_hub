@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_hub.portfolio.neutral import neutralise, rolling_betas
 from quant_hub.portfolio.pit_construction import build
@@ -155,3 +156,23 @@ def test_hmm_regime_multipliers_flag_the_high_variance_segment():
     hot = m[(m.index >= dates[460]) & (m.index < dates[550])]
     after = m[m.index >= dates[570]]
     assert (calm == 1.0).mean() > 0.8 and (hot == 0.5).mean() > 0.8 and (after == 1.0).mean() > 0.9
+
+
+def test_betas_to_a_benchmark_and_the_minimum_variance_hedge():
+    rng = np.random.default_rng(3)
+    dates = pd.date_range("2025-01-01", periods=200, freq="D")
+    m = rng.normal(0, 0.03, len(dates))
+    rows = []
+    for a, b in (("BTC", 1.0), ("ETH", 1.3), ("ZEC", 2.0)):
+        r = b * m + rng.normal(0, 0.01 if a != "ZEC" else 0.04, len(dates))
+        rows += [dict(date=d, asset=a, price_returns=x, funding=0.0, in_universe=True) for d, x in zip(dates, r)]
+    df = pd.DataFrame(rows)
+    hb = rolling_betas(df, window=90, benchmark="BTC")
+    last = df["date"] == dates[-1]
+    got = dict(zip(df.loc[last, "asset"], hb[last]))
+    assert got["BTC"] == pytest.approx(1.0) and got["ETH"] == pytest.approx(1.3, abs=0.15)
+    w = pd.Series(np.where(df["asset"] == "ZEC", -0.10, np.where(df["asset"] == "ETH", 0.05, 0.02)), index=df.index)
+    out = neutralise(w, df["date"], "hedge", beta=hb, assets=df["asset"])
+    # convictions untouched, only the BTC line moves, and the book's beta to BTC is zero
+    assert (out[df["asset"] != "BTC"] == w[df["asset"] != "BTC"]).all()
+    assert (hb * out)[last].sum() == pytest.approx(0.0, abs=1e-12)

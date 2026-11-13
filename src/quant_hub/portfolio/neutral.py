@@ -10,12 +10,16 @@ import numpy as np
 import pandas as pd
 
 
-def rolling_betas(panel: pd.DataFrame, window: int = 90, min_periods: int = 45) -> pd.Series:
+def rolling_betas(
+    panel: pd.DataFrame, window: int = 90, min_periods: int = 45, benchmark: str | None = None
+) -> pd.Series:
     """Per (date, asset) beta to the equal-weight basket of in-universe names, known at t-1.
 
     OLS slope of the asset's daily total return on the basket's return over the
     trailing `window` days, shifted by one day so the weight on day d uses only
-    returns up to d-1. Aligned to `panel.index`.
+    returns up to d-1. Aligned to `panel.index`. With `benchmark` (an asset, e.g.
+    "BTC") the slope is on that asset's return instead of the basket: the betas a
+    minimum-variance hedge in that asset needs (the benchmark's own beta is 1).
     """
     r = panel["price_returns"] + panel["funding"]
     wide = pd.DataFrame({"r": r, "date": panel["date"], "asset": panel["asset"]}).pivot(
@@ -26,7 +30,7 @@ def rolling_betas(panel: pd.DataFrame, window: int = 90, min_periods: int = 45) 
         .pivot(index="date", columns="asset", values="u")
         .fillna(False)
     )
-    basket = wide.where(uni).mean(axis=1)
+    basket = wide[benchmark] if benchmark is not None else wide.where(uni).mean(axis=1)
     cov = wide.rolling(window, min_periods=min_periods).cov(basket)
     var = basket.rolling(window, min_periods=min_periods).var()
     beta = cov.div(var, axis=0).shift(1)
@@ -52,7 +56,10 @@ def neutralise(
     "beta":   project the weight vector onto the complement of the beta vector
               (Σ β_i w_i = 0); names without a beta keep their weight.
     "hedge":  keep every weight, add -Σ β_i w_i / β_hedge to `hedge_asset`
-              (the hedge leg is exempt from the per-asset cap).
+              (the hedge leg is exempt from the per-asset cap). With betas to the
+              hedge asset itself (`rolling_betas(..., benchmark=hedge_asset)`) this
+              is the minimum-variance hedge of the book in that asset (Paleologo,
+              Advanced Portfolio Management, 11.8: external hedge, below the naive −b).
     After "dollar" and "beta" the gross is renormalised to ≤ 1 and the cap
     re-applied, as in the production clamp. NaN weights are left as NaN.
     """
